@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as SecureStore from "expo-secure-store";
 import { api, PlayRecord as ApiPlayRecord, Favorite as ApiFavorite } from "./api";
 import { storageConfig } from "./storageConfig";
 import Logger from '@/utils/Logger';
@@ -50,6 +51,9 @@ export interface LoginCredentials {
 const generateKey = (source: string, id: string) => `${source}+${id}`;
 
 // --- PlayerSettingsManager (Uses AsyncStorage) ---
+/** 播放器个性化设置上限（仅用户自定义过片头/片尾/倍速的条目才会写入） */
+const MAX_PLAYER_SETTINGS = 200;
+
 export class PlayerSettingsManager {
   static async getAll(): Promise<Record<string, PlayerSettings>> {
     try {
@@ -80,6 +84,11 @@ export class PlayerSettingsManager {
     // Only save if there are actual values to save
     if (settings.introEndTime !== undefined || settings.outroStartTime !== undefined || settings.playbackRate !== undefined) {
       allSettings[key] = { ...allSettings[key], ...settings };
+      // 超限时按插入顺序淘汰最旧条目（字符串 key 保持插入序）
+      const keys = Object.keys(allSettings);
+      if (keys.length > MAX_PLAYER_SETTINGS) {
+        keys.slice(0, keys.length - MAX_PLAYER_SETTINGS).forEach((k) => delete allSettings[k]);
+      }
     } else {
       // If all are undefined, remove the key
       delete allSettings[key];
@@ -170,6 +179,9 @@ export class FavoriteManager {
 }
 
 // --- PlayRecordManager (Dynamic: API or LocalStorage) ---
+/** 本地播放记录上限：防止 AsyncStorage 无限增长（Android 单 key 约 6MB 上限） */
+const MAX_PLAY_RECORDS = 200;
+
 export class PlayRecordManager {
   private static getStorageType() {
     return storageConfig.getStorageType();
@@ -225,6 +237,14 @@ export class PlayRecordManager {
       const allRecords = await this.getAll();
       const fullRecord = { ...apiRecord, save_time: Date.now() };
       allRecords[key] = { ...allRecords[key], ...fullRecord };
+      // 超限时按 save_time 淘汰最旧的记录
+      const keys = Object.keys(allRecords);
+      if (keys.length > MAX_PLAY_RECORDS) {
+        keys
+          .sort((a, b) => (allRecords[a].save_time || 0) - (allRecords[b].save_time || 0))
+          .slice(0, keys.length - MAX_PLAY_RECORDS)
+          .forEach((k) => delete allRecords[k]);
+      }
       await AsyncStorage.setItem(STORAGE_KEYS.PLAY_RECORDS, JSON.stringify(allRecords));
     } else {
       await api.savePlayRecord(key, apiRecord);
@@ -343,11 +363,13 @@ export class SettingsManager {
   }
 }
 
-// --- LoginCredentialsManager (Uses AsyncStorage) ---
+// --- LoginCredentialsManager (Uses expo-secure-store) ---
+// 安全说明：登录凭据必须存放在系统级安全存储（iOS Keychain / Android Keystore），
+// 而不是 AsyncStorage（明文）。SecureStore 在设备锁定时加密，卸载 App 后由系统清理。
 export class LoginCredentialsManager {
   static async get(): Promise<LoginCredentials | null> {
     try {
-      const data = await AsyncStorage.getItem(STORAGE_KEYS.LOGIN_CREDENTIALS);
+      const data = await SecureStore.getItemAsync(STORAGE_KEYS.LOGIN_CREDENTIALS);
       return data ? JSON.parse(data) : null;
     } catch (error) {
       logger.info("Failed to get login credentials:", error);
@@ -357,7 +379,12 @@ export class LoginCredentialsManager {
 
   static async save(credentials: LoginCredentials): Promise<void> {
     try {
-      await AsyncStorage.setItem(STORAGE_KEYS.LOGIN_CREDENTIALS, JSON.stringify(credentials));
+      await SecureStore.setItemAsync(
+        STORAGE_KEYS.LOGIN_CREDENTIALS,
+        JSON.stringify(credentials)
+      );
+      // 兼容：清理旧版存在 AsyncStorage 里的明文凭据
+      await AsyncStorage.removeItem(STORAGE_KEYS.LOGIN_CREDENTIALS);
     } catch (error) {
       logger.error("Failed to save login credentials:", error);
     }
@@ -365,6 +392,8 @@ export class LoginCredentialsManager {
 
   static async clear(): Promise<void> {
     try {
+      await SecureStore.deleteItemAsync(STORAGE_KEYS.LOGIN_CREDENTIALS);
+      // 兼容：同时清理旧版明文残留
       await AsyncStorage.removeItem(STORAGE_KEYS.LOGIN_CREDENTIALS);
     } catch (error) {
       logger.error("Failed to clear login credentials:", error);

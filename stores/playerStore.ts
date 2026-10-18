@@ -8,6 +8,12 @@ import Logger from '@/utils/Logger';
 
 const logger = Logger.withTag('PlayerStore');
 
+/** 播放记录保存节流间隔（毫秒） */
+const RECORD_SAVE_THROTTLE_MS = 10_000;
+
+/** 快进/快退后重置 seeking 状态的延迟（毫秒） */
+const SEEK_RESET_DELAY_MS = 1_000;
+
 interface Episode {
   url: string;
   title: string;
@@ -191,15 +197,18 @@ const usePlayerStore = create<PlayerState>((set, get) => ({
     
     logger.info(`[SUCCESS] Final validation passed - detail: ${detail.source_name}, episodes: ${episodes.length}`);
 
+    // 验证后 detail 非空，赋值给常量避免后续非空断言
+    const validDetail = detail;
+
     try {
       const storageStart = performance.now();
       logger.info(`[PERF] Storage operations START`);
       
-      const playRecord = await PlayRecordManager.get(detail!.source, detail!.id.toString());
+      const playRecord = await PlayRecordManager.get(validDetail.source, validDetail.id.toString());
       const storagePlayRecordEnd = performance.now();
       logger.info(`[PERF] PlayRecordManager.get took ${(storagePlayRecordEnd - storageStart).toFixed(2)}ms`);
       
-      const playerSettings = await PlayerSettingsManager.get(detail!.source, detail!.id.toString());
+      const playerSettings = await PlayerSettingsManager.get(validDetail.source, validDetail.id.toString());
       const storageEnd = performance.now();
       logger.info(`[PERF] PlayerSettingsManager.get took ${(storageEnd - storagePlayRecordEnd).toFixed(2)}ms`);
       logger.info(`[PERF] Total storage operations took ${(storageEnd - storageStart).toFixed(2)}ms`);
@@ -292,7 +301,7 @@ const usePlayerStore = create<PlayerState>((set, get) => ({
     if (get()._seekTimeout) {
       clearTimeout(get()._seekTimeout);
     }
-    const timeoutId = setTimeout(() => set({ isSeeking: false }), 1000);
+    const timeoutId = setTimeout(() => set({ isSeeking: false }), SEEK_RESET_DELAY_MS);
     set({ _seekTimeout: timeoutId });
   },
 
@@ -358,7 +367,7 @@ const usePlayerStore = create<PlayerState>((set, get) => ({
       set({ _isRecordSaveThrottled: true });
       setTimeout(() => {
         set({ _isRecordSaveThrottled: false });
-      }, 10000); // 10 seconds
+      }, RECORD_SAVE_THROTTLE_MS);
     }
 
     const { detail } = useDetailStore.getState();

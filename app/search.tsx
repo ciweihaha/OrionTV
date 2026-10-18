@@ -49,6 +49,15 @@ export default function SearchScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastMessage, targetPage]);
 
+  // 组件卸载时清理防抖定时器
+  useEffect(() => {
+    return () => {
+      if (searchDebounceTimer.current) {
+        clearTimeout(searchDebounceTimer.current);
+      }
+    };
+  }, []);
+
   // useEffect(() => {
   //   // Focus the text input when the screen loads
   //   const timer = setTimeout(() => {
@@ -57,28 +66,49 @@ export default function SearchScreen() {
   //   return () => clearTimeout(timer);
   // }, []);
 
+  // 搜索防抖：防止远程输入连续触发或用户快速重复点击产生大量请求
+  const searchDebounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isSearchingRef = useRef(false);
+
   const handleSearch = async (searchText?: string) => {
-    const term = typeof searchText === "string" ? searchText : keyword;
-    if (!term.trim()) {
-      Keyboard.dismiss();
+    // 防抖 300ms
+    if (searchDebounceTimer.current) {
+      clearTimeout(searchDebounceTimer.current);
+    }
+    // 正在搜索中则忽略重复触发
+    if (isSearchingRef.current) {
       return;
     }
-    Keyboard.dismiss();
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await api.searchVideos(term);
-      if (response.results.length > 0) {
-        setResults(response.results);
-      } else {
-        setError("没有找到相关内容");
-      }
-    } catch (err) {
-      setError("搜索失败，请稍后重试。");
-      logger.info("Search failed:", err);
-    } finally {
-      setLoading(false);
-    }
+
+    return new Promise<void>((resolve) => {
+      searchDebounceTimer.current = setTimeout(async () => {
+        const term = typeof searchText === "string" ? searchText : keyword;
+        if (!term.trim()) {
+          Keyboard.dismiss();
+          resolve();
+          return;
+        }
+        Keyboard.dismiss();
+        isSearchingRef.current = true;
+        setLoading(true);
+        setError(null);
+        try {
+          const response = await api.searchVideos(term);
+          if (response.results.length > 0) {
+            setResults(response.results);
+          } else {
+            setError("没有找到相关内容");
+          }
+        } catch (err) {
+          setError("搜索失败，请稍后重试。");
+          logger.info("Search failed:", err);
+        } finally {
+          setLoading(false);
+          isSearchingRef.current = false;
+          resolve();
+        }
+      }, 300);
+    });
   };
 
   const onSearchPress = () => handleSearch();

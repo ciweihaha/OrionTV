@@ -81,6 +81,9 @@ export class API {
   // 会话恢复回调（由 authStore 注册），401 时自动重登并重试一次
   private sessionRestorer: (() => Promise<boolean>) | null = null;
 
+  // 默认请求超时（毫秒）
+  private static readonly DEFAULT_TIMEOUT = 15000;
+
   constructor(baseURL?: string) {
     if (baseURL) {
       this.baseURL = baseURL;
@@ -95,37 +98,72 @@ export class API {
     this.sessionRestorer = restorer;
   }
 
-  private async _fetch(url: string, options: RequestInit = {}): Promise<Response> {
+  private async _fetch(url: string, options: RequestInit = {}, timeoutMs: number = API.DEFAULT_TIMEOUT): Promise<Response> {
     if (!this.baseURL) {
       throw new Error("API_URL_NOT_SET");
     }
 
-    // 框架默认会携带 cookie，无需手动设置
-    const response = await fetch(`${this.baseURL}${url}`, options);
+    // 超时控制：调用方传入的 signal 优先，否则创建带超时的 controller
+    let signal = options.signal;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    if (!signal) {
+      const controller = new AbortController();
+      timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      signal = controller.signal;
+    }
 
-    if (response.status === 401) {
-      // 会话过期：自动重登后重试一次（登录接口本身除外，避免循环）
-      if (this.sessionRestorer && !url.startsWith("/api/login")) {
-        const restored = await this.sessionRestorer();
-        if (restored) {
-          const retryResponse = await fetch(`${this.baseURL}${url}`, options);
-          if (retryResponse.status === 401) {
-            throw new Error("UNAUTHORIZED");
+    try {
+      // 框架默认会携带 cookie，无需手动设置
+      const response = await fetch(`${this.baseURL}${url}`, { ...options, signal });
+
+      if (response.status === 401) {
+        // 会话过期：自动重登后重试一次（登录接口本身除外，避免循环）
+        if (this.sessionRestorer && !url.startsWith("/api/login")) {
+          const restored = await this.sessionRestorer();
+          if (restored) {
+            // 重试时若原 signal 已中止（如超时），用新的超时 signal，避免重试直接失败
+            let retrySignal = signal;
+            let retryTimeoutId: ReturnType<typeof setTimeout> | undefined;
+            if (signal.aborted) {
+              const retryController = new AbortController();
+              retryTimeoutId = setTimeout(() => retryController.abort(), timeoutMs);
+              retrySignal = retryController.signal;
+            }
+            try {
+              const retryResponse = await fetch(`${this.baseURL}${url}`, { ...options, signal: retrySignal });
+              if (retryResponse.status === 401) {
+                throw new Error("UNAUTHORIZED");
+              }
+              if (!retryResponse.ok) {
+                throw new Error(`HTTP error! status: ${retryResponse.status}`);
+              }
+              return retryResponse;
+            } finally {
+              if (retryTimeoutId) {
+                clearTimeout(retryTimeoutId);
+              }
+            }
           }
-          if (!retryResponse.ok) {
-            throw new Error(`HTTP error! status: ${retryResponse.status}`);
-          }
-          return retryResponse;
         }
+        throw new Error("UNAUTHORIZED");
       }
-      throw new Error("UNAUTHORIZED");
-    }
 
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
 
-    return response;
+      return response;
+    } catch (error) {
+      // 超时错误转为更友好的错误信息
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new Error(`REQUEST_TIMEOUT: ${url}`);
+      }
+      throw error;
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
   }
 
   async login(username?: string | undefined, password?: string): Promise<{ ok: boolean }> {
@@ -135,13 +173,16 @@ export class API {
       body: JSON.stringify({ username, password }),
     });
 
-    // 存储cookie到AsyncStorage
-    const cookies = response.headers.get("Set-Cookie");
-    if (cookies) {
-      await AsyncStorage.setItem("authCookies", cookies);
+    // 注意：Set-Cookie 是 forbidden response header，RN 的 fetch 无法通过
+    // headers.get() 读取（永远返回 null）。但原生网络层（OkHttp/NSURLSession）
+    // 会自动管理 cookie jar，后续请求会自动携带 cookie。
+    // 这里只存一个登录标记位，供 authStore.checkLoginStatus 判断用。
+    const result = await response.json();
+    if (result && result.ok) {
+      await AsyncStorage.setItem("authCookies", "1");
     }
 
-    return response.json();
+    return result;
   }
 
   async logout(): Promise<{ ok: boolean }> {
@@ -219,6 +260,9 @@ export class API {
   }
 
   getImageProxyUrl(imageUrl: string): string {
+    if (!imageUrl || typeof imageUrl !== "string" || !imageUrl.trim()) {
+      return "";
+    }
     return `${this.baseURL}/api/image-proxy?url=${encodeURIComponent(imageUrl)}`;
   }
 
@@ -243,7 +287,14 @@ export class API {
     const url = `/api/search/one?q=${encodeURIComponent(query)}&resourceId=${encodeURIComponent(resourceId)}`;
     const response = await this._fetch(url, { signal });
     const { results } = await response.json();
-    return { results: results.filter((item: any) => item.title === query )};
+    // 模糊匹配：归一化后比较（去空格、转小写），避免标题多一个符号就丢结果
+    const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, "");
+    const normalizedQuery = normalize(query);
+    return {
+      results: (results as SearchResult[]).filter((item: SearchResult) =>
+        item.title && normalize(item.title).includes(normalizedQuery)
+      ),
+    };
   }
 
   async getResources(signal?: AbortSignal): Promise<ApiSite[]> {

@@ -7,6 +7,7 @@ const logger = Logger.withTag('RemoteControlStore');
 interface RemoteControlState {
   isServerRunning: boolean;
   serverUrl: string | null;
+  pairingCode: string | null;
   error: string | null;
   startServer: () => Promise<void>;
   stopServer: () => void;
@@ -22,6 +23,7 @@ interface RemoteControlState {
 export const useRemoteControlStore = create<RemoteControlState>((set, get) => ({
   isServerRunning: false,
   serverUrl: null,
+  pairingCode: null,
   error: null,
   isModalVisible: false,
   lastMessage: null,
@@ -45,8 +47,9 @@ export const useRemoteControlStore = create<RemoteControlState>((set, get) => ({
     });
     try {
       const url = await remoteControlService.startServer();
+      const pairingCode = remoteControlService.getPairingCode();
       logger.info('Server started, URL:', url);
-      set({ isServerRunning: true, serverUrl: url, error: null });
+      set({ isServerRunning: true, serverUrl: url, pairingCode, error: null });
     } catch {
       const errorMessage = '启动失败，请强制退应用后重试。';
       logger.error('Failed to start server:', errorMessage);
@@ -57,7 +60,7 @@ export const useRemoteControlStore = create<RemoteControlState>((set, get) => ({
   stopServer: () => {
     if (get().isServerRunning) {
       remoteControlService.stopServer();
-      set({ isServerRunning: false, serverUrl: null });
+      set({ isServerRunning: false, serverUrl: null, pairingCode: null });
     }
   },
 

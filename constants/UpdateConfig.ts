@@ -7,11 +7,11 @@ export const UPDATE_CONFIG = {
 
   // GitHub相关URL
   GITHUB_RAW_URL:
-    `https://ghfast.top/https://raw.githubusercontent.com/orion-lib/OrionTV/refs/heads/master/package.json?t=${Date.now()}`,
+    `https://ghfast.top/https://raw.githubusercontent.com/ciweihaha/OrionTV/refs/heads/master/package.json?t=${Date.now()}`,
 
   // 获取平台特定的下载URL
   getDownloadUrl(version: string): string {
-    return `https://ghfast.top/https://github.com/orion-lib/OrionTV/releases/download/v${version}/orionTV.${version}.apk`;
+    return `https://ghfast.top/https://github.com/ciweihaha/OrionTV/releases/download/v${version}/orionTV.${version}.apk`;
   },
 
   // 是否显示更新日志
@@ -19,9 +19,6 @@ export const UPDATE_CONFIG = {
 
   // 是否允许跳过版本
   ALLOW_SKIP_VERSION: true,
-
-  // 下载超时时间（毫秒）
-  DOWNLOAD_TIMEOUT: 10 * 60 * 1000, // 10分钟
 
   // 是否在WIFI下自动下载
   AUTO_DOWNLOAD_ON_WIFI: false,

@@ -62,7 +62,7 @@ class TCPHttpServer {
 
       return { method, url, headers, body };
     } catch (error) {
-      logger.info('[TCPHttpServer] Error parsing HTTP request:', error);
+      logger.error('[TCPHttpServer] Error parsing HTTP request:', error);
       return null;
     }
   }
@@ -71,7 +71,9 @@ class TCPHttpServer {
     const statusTexts: { [key: number]: string } = {
       200: 'OK',
       400: 'Bad Request',
+      403: 'Forbidden',
       404: 'Not Found',
+      413: 'Payload Too Large',
       500: 'Internal Server Error'
     };
 
@@ -122,9 +124,17 @@ class TCPHttpServer {
           
           let requestData = '';
           
+          // 请求体上限 1MB，防恶意客户端无限发送耗尽内存
+          const MAX_REQUEST_BYTES = 1024 * 1024;
           socket.on('data', async (data: string | Buffer) => {
             requestData += data.toString();
-            
+            if (requestData.length > MAX_REQUEST_BYTES) {
+              logger.error('[TCPHttpServer] Request too large, closing connection');
+              socket.end();
+              requestData = '';
+              return;
+            }
+
             // Check if we have a complete HTTP request
             if (requestData.includes('\r\n\r\n')) {
               try {
@@ -143,7 +153,7 @@ class TCPHttpServer {
                   socket.write(errorResponse);
                 }
               } catch (error) {
-                logger.info('[TCPHttpServer] Error handling request:', error);
+                logger.error('[TCPHttpServer] Error handling request:', error);
                 const errorResponse = this.formatHttpResponse({
                   statusCode: 500,
                   headers: { 'Content-Type': 'text/plain' },
@@ -158,7 +168,7 @@ class TCPHttpServer {
           });
 
           socket.on('error', (error: Error) => {
-            logger.info('[TCPHttpServer] Socket error:', error);
+            logger.error('[TCPHttpServer] Socket error:', error);
           });
 
           socket.on('close', () => {
@@ -173,13 +183,13 @@ class TCPHttpServer {
         });
 
         this.server.on('error', (error: Error) => {
-          logger.info('[TCPHttpServer] Server error:', error);
+          logger.error('[TCPHttpServer] Server error:', error);
           this.isRunning = false;
           reject(error);
         });
 
       } catch (error) {
-        logger.info('[TCPHttpServer] Failed to start server:', error);
+        logger.error('[TCPHttpServer] Failed to start server:', error);
         reject(error);
       }
     });
