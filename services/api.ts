@@ -118,7 +118,11 @@ export class API {
 
       if (response.status === 401) {
         // 会话过期：自动重登后重试一次（登录接口本身除外，避免循环）
-        if (this.sessionRestorer && !url.startsWith("/api/login")) {
+        // 只对幂等请求自动重试（GET/DELETE/HEAD）；POST/PUT 等非幂等请求不自动重试，
+        // 避免"首次请求成功但响应丢失"时重试导致重复提交（如重复添加收藏）
+        const method = (options.method || "GET").toUpperCase();
+        const isIdempotent = method === "GET" || method === "DELETE" || method === "HEAD";
+        if (this.sessionRestorer && !url.startsWith("/api/login") && isIdempotent) {
           const restored = await this.sessionRestorer();
           if (restored) {
             // 重试时若原 signal 已中止（如超时），用新的超时 signal，避免重试直接失败
