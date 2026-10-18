@@ -11,6 +11,9 @@ const logger = Logger.withTag('PlayerStore');
 /** 播放记录保存节流间隔（毫秒） */
 const RECORD_SAVE_THROTTLE_MS = 10_000;
 
+/** 快进/快退后重置 seeking 状态的延迟（毫秒） */
+const SEEK_RESET_DELAY_MS = 1_000;
+
 interface Episode {
   url: string;
   title: string;
@@ -295,7 +298,7 @@ const usePlayerStore = create<PlayerState>((set, get) => ({
     if (get()._seekTimeout) {
       clearTimeout(get()._seekTimeout);
     }
-    const timeoutId = setTimeout(() => set({ isSeeking: false }), 1000);
+    const timeoutId = setTimeout(() => set({ isSeeking: false }), SEEK_RESET_DELAY_MS);
     set({ _seekTimeout: timeoutId });
   },
 

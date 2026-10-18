@@ -384,13 +384,18 @@ const useDetailStore = create<DetailState>((set, get) => ({
       const aResolution = a.resolution || '';
       const bResolution = b.resolution || '';
       
-      // 优先级: 1080p > 720p > 其他 > 无分辨率
+      // 优先级: 1080p > 720p > 480p > 360p > 无分辨率
+      const RESOLUTION_PRIORITY_1080P = 4;
+      const RESOLUTION_PRIORITY_720P = 3;
+      const RESOLUTION_PRIORITY_480P = 2;
+      const RESOLUTION_PRIORITY_360P = 1;
+      const RESOLUTION_PRIORITY_UNKNOWN = 0;
       const resolutionPriority = (res: string) => {
-        if (res.includes('1080')) return 4;
-        if (res.includes('720')) return 3;
-        if (res.includes('480')) return 2;
-        if (res.includes('360')) return 1;
-        return 0;
+        if (res.includes('1080')) return RESOLUTION_PRIORITY_1080P;
+        if (res.includes('720')) return RESOLUTION_PRIORITY_720P;
+        if (res.includes('480')) return RESOLUTION_PRIORITY_480P;
+        if (res.includes('360')) return RESOLUTION_PRIORITY_360P;
+        return RESOLUTION_PRIORITY_UNKNOWN;
       };
       
       return resolutionPriority(bResolution) - resolutionPriority(aResolution);
