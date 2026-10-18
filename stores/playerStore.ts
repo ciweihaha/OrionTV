@@ -8,6 +8,9 @@ import Logger from '@/utils/Logger';
 
 const logger = Logger.withTag('PlayerStore');
 
+/** 播放记录保存节流间隔（毫秒） */
+const RECORD_SAVE_THROTTLE_MS = 10_000;
+
 interface Episode {
   url: string;
   title: string;
@@ -358,7 +361,7 @@ const usePlayerStore = create<PlayerState>((set, get) => ({
       set({ _isRecordSaveThrottled: true });
       setTimeout(() => {
         set({ _isRecordSaveThrottled: false });
-      }, 10000); // 10 seconds
+      }, RECORD_SAVE_THROTTLE_MS);
     }
 
     const { detail } = useDetailStore.getState();

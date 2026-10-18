@@ -20,6 +20,11 @@ interface VersionInfo {
  */
 const ANDROID_MIME_TYPE = 'application/vnd.android.package-archive';
 
+/** 版本检查请求超时（毫秒） */
+const VERSION_CHECK_TIMEOUT_MS = 10_000;
+/** SHA256 文件获取超时（毫秒） */
+const SHA256_FETCH_TIMEOUT_MS = 15_000;
+
 class UpdateService {
   private static instance: UpdateService;
   static getInstance(): UpdateService {
@@ -37,7 +42,7 @@ class UpdateService {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10_000);
+        const timeoutId = setTimeout(() => controller.abort(), VERSION_CHECK_TIMEOUT_MS);
         const response = await fetch(UPDATE_CONFIG.GITHUB_RAW_URL, {
           signal: controller.signal,
         });
@@ -189,7 +194,7 @@ class UpdateService {
     let expected = "";
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15_000);
+      const timeoutId = setTimeout(() => controller.abort(), SHA256_FETCH_TIMEOUT_MS);
       const resp = await fetch(`${downloadUrl}.sha256`, { signal: controller.signal });
       clearTimeout(timeoutId);
       if (resp.ok) {
