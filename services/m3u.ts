@@ -56,6 +56,8 @@ export const parseM3U = (m3uText: string): Channel[] => {
 
 // M3U 拉取超时（毫秒）
 const M3U_FETCH_TIMEOUT_MS = 15_000;
+// M3U 播放列表最大体积：频道列表通常 < 1MB，5MB 已足够（R13）
+const MAX_M3U_BYTES = 5 * 1024 * 1024;
 
 export const fetchAndParseM3u = async (m3uUrl: string): Promise<Channel[]> => {
   const controller = new AbortController();
@@ -65,7 +67,12 @@ export const fetchAndParseM3u = async (m3uUrl: string): Promise<Channel[]> => {
     if (!response.ok) {
       throw new Error(`Failed to fetch M3U: ${response.statusText}`);
     }
-    const m3uText = await response.text();
+    // 流式读取并限制体积：防超大列表占满内存（R13）
+    const m3uText = await readTextWithLimit(response, MAX_M3U_BYTES);
+    if (m3uText === null) {
+      logger.info(`M3U playlist exceeded ${MAX_M3U_BYTES} bytes, rejected: ${m3uUrl.substring(0, 80)}`);
+      return [];
+    }
     return parseM3U(m3uText);
   } catch (error) {
     logger.info("Error fetching or parsing M3U:", error);
@@ -90,4 +97,34 @@ export const getPlayableUrl = (originalUrl: string | null): string | null => {
   // }
   // HTTPS streams can be played directly.
   return originalUrl;
+};
+
+/**
+ * 流式读取响应体文本，超限返回 null（R13）
+ */
+const readTextWithLimit = async (response: Response, maxBytes: number): Promise<string | null> => {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const text = await response.text();
+    return text.length <= maxBytes ? text : null;
+  }
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
+  let result = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        return null;
+      }
+      result += decoder.decode(value, { stream: true });
+    }
+    result += decoder.decode();
+    return result;
+  } finally {
+    reader.releaseLock();
+  }
 };

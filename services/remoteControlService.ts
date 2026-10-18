@@ -147,7 +147,17 @@ class RemoteControlService {
           try {
             const parsedBody = JSON.parse(request.body || "{}");
             const message = parsedBody.message;
-            if (message) {
+            // 消息长度上限：远程键盘输入文本，10KB 已远超正常使用（R13）
+            const MAX_MESSAGE_LENGTH = 10 * 1024;
+            if (typeof message === "string" && message.length > 0) {
+              if (message.length > MAX_MESSAGE_LENGTH) {
+                logger.info(`[RemoteControl] Message too long (${message.length} chars), rejected`);
+                return {
+                  statusCode: 413,
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ error: "Message too long" }),
+                };
+              }
               this.onMessage(message);
             }
             return {
