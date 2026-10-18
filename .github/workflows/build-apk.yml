@@ -44,6 +44,12 @@ jobs:
           mkdir -p artifacts
           cp android/app/build/outputs/apk/release/app-release.apk artifacts/orionTV.${{ steps.package-version.outputs.version }}.apk
 
+      - name: Generate SHA256 checksum
+        run: |
+          cd artifacts
+          sha256sum orionTV.${{ steps.package-version.outputs.version }}.apk > orionTV.${{ steps.package-version.outputs.version }}.apk.sha256
+          cat orionTV.${{ steps.package-version.outputs.version }}.apk.sha256
+
       - name: Create Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
@@ -52,6 +58,8 @@ jobs:
           body: Automated release for version v${{ steps.package-version.outputs.version }}.
           draft: false
           prerelease: false
-          files: artifacts/orionTV.${{ steps.package-version.outputs.version }}.apk
+          files: |
+            artifacts/orionTV.${{ steps.package-version.outputs.version }}.apk
+            artifacts/orionTV.${{ steps.package-version.outputs.version }}.apk.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

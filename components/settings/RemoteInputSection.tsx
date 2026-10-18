@@ -18,7 +18,7 @@ interface RemoteInputSectionProps {
 
 export const RemoteInputSection: React.FC<RemoteInputSectionProps> = ({ onChanged, onFocus, onBlur, onPress }) => {
   const { remoteInputEnabled, setRemoteInputEnabled } = useSettingsStore();
-  const { isServerRunning, serverUrl, error } = useRemoteControlStore();
+  const { isServerRunning, serverUrl, pairingCode, error } = useRemoteControlStore();
   const [isFocused, setIsFocused] = React.useState(false);
   const animationStyle = useButtonAnimation(isFocused, 1.2);
   const deviceType = useResponsiveLayout().deviceType;
@@ -100,6 +100,15 @@ export const RemoteInputSection: React.FC<RemoteInputSectionProps> = ({ onChange
             <View style={styles.statusItem}>
               <ThemedText style={styles.statusLabel}>访问地址：</ThemedText>
               <ThemedText style={styles.statusValue}>{serverUrl}</ThemedText>
+            </View>
+          )}
+
+          {pairingCode && isServerRunning && (
+            <View style={styles.statusItem}>
+              <ThemedText style={styles.statusLabel}>配对码：</ThemedText>
+              <ThemedText style={[styles.statusValue, { fontSize: 24, fontWeight: "bold", letterSpacing: 8 }]}>
+                {pairingCode}
+              </ThemedText>
             </View>
           )}
 
