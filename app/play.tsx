@@ -90,8 +90,13 @@ export default function PlayScreen() {
     id?: string;
     title?: string;
   }>();
-  const episodeIndex = parseInt(episodeIndexStr || "0", 10);
-  const position = positionStr ? parseInt(positionStr, 10) : undefined;
+  const rawEpisodeIndex = parseInt(episodeIndexStr || "0", 10);
+  // 防御：NaN 或负数时回退到 0，避免后续数组越界
+  const episodeIndex = isNaN(rawEpisodeIndex) || rawEpisodeIndex < 0 ? 0 : rawEpisodeIndex;
+  const rawPosition = positionStr ? parseInt(positionStr, 10) : undefined;
+  const position = rawPosition !== undefined && (isNaN(rawPosition) || rawPosition < 0)
+    ? undefined
+    : rawPosition;
 
   const { detail } = useDetailStore();
   const source = sourceStr || detail?.source;

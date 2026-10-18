@@ -3,7 +3,10 @@ import Logger from '@/utils/Logger';
 
 const logger = Logger.withTag('RemoteControl');
 
-const getRemotePageHTML = () => {
+// 配对码有效期：服务器每次启动时重新生成
+const PAIRING_CODE_LENGTH = 4;
+
+const getRemotePageHTML = (paired: boolean) => {
   return `
   <!DOCTYPE html>
   <html>
@@ -15,31 +18,60 @@ const getRemotePageHTML = () => {
       body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background-color: #121212; color: white; }
       h3 { color: #eee; }
       #container { display: flex; flex-direction: column; align-items: center; width: 90%; max-width: 400px; }
-      #text { width: 100%; padding: 15px; font-size: 16px; border-radius: 8px; border: 1px solid #333; background-color: #2a2a2a; color: white; margin-bottom: 20px; box-sizing: border-box; }
+      #text, #code { width: 100%; padding: 15px; font-size: 16px; border-radius: 8px; border: 1px solid #333; background-color: #2a2a2a; color: white; margin-bottom: 20px; box-sizing: border-box; }
       button { width: 100%; padding: 15px; font-size: 18px; font-weight: bold; border: none; border-radius: 8px; background-color: #007AFF; color: white; cursor: pointer; }
       button:active { background-color: #0056b3; }
+      button:disabled { background-color: #444; }
+      #pairSection { width: 100%; }
+      #inputSection { width: 100%; display: ${paired ? 'flex' : 'none'}; flex-direction: column; align-items: center; }
+      .hint { color: #888; font-size: 14px; margin-bottom: 20px; text-align: center; }
     </style>
   </head>
   <body>
     <div id="container">
-      <h3>向电视发送文本</h3>
-      <input id="text" placeholder="请输入..." />
-      <button onclick="send()">发送</button>
+      <div id="pairSection" style="display: ${paired ? 'none' : 'block'}; width: 100%;">
+        <h3>配对验证</h3>
+        <p class="hint">请输入电视屏幕上显示的 ${PAIRING_CODE_LENGTH} 位配对码</p>
+        <input id="code" placeholder="配对码" inputmode="numeric" maxlength="${PAIRING_CODE_LENGTH}" />
+        <button onclick="pair()">配对</button>
+      </div>
+      <div id="inputSection">
+        <h3>向电视发送文本</h3>
+        <input id="text" placeholder="请输入..." />
+        <button onclick="send()">发送</button>
+      </div>
     </div>
     <script>
-      window.addEventListener('DOMContentLoaded', () => {
-        fetch('/handshake', { method: 'POST' }).catch(err => logger.info('Handshake failed:', err));
-      });
+      let pairingCode = ${paired ? 'sessionStorage.getItem("orion_pair_code") || ""' : '""'};
+      function pair() {
+        const input = document.getElementById("code");
+        const code = input.value.trim();
+        if (!code) return;
+        fetch('/handshake', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Pairing-Code': code },
+          body: JSON.stringify({})
+        }).then(r => {
+          if (r.ok) {
+            pairingCode = code;
+            sessionStorage.setItem("orion_pair_code", code);
+            document.getElementById("pairSection").style.display = "none";
+            document.getElementById("inputSection").style.display = "flex";
+          } else {
+            alert("配对码错误，请重试");
+          }
+        }).catch(err => console.log('Pair failed:', err));
+      }
       function send() {
         const input = document.getElementById("text");
         const value = input.value;
         if (value) {
           fetch("/message", {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'X-Pairing-Code': pairingCode },
             body: JSON.stringify({ message: value })
           })
-          .catch(err => logger.info('Message send failed:', err));
+          .catch(err => console.log('Message send failed:', err));
           input.value = '';
         }
       }
@@ -53,10 +85,32 @@ class RemoteControlService {
   private httpServer: TCPHttpServer;
   private onMessage: (message: string) => void = () => {};
   private onHandshake: () => void = () => {};
+  // 配对码：每次启动服务器时重新生成，防止局域网未授权访问
+  private pairingCode: string = "";
 
   constructor() {
     this.httpServer = new TCPHttpServer();
     this.setupRequestHandler();
+  }
+
+  private generatePairingCode(): string {
+    let code = "";
+    for (let i = 0; i < PAIRING_CODE_LENGTH; i++) {
+      code += Math.floor(Math.random() * 10).toString();
+    }
+    return code;
+  }
+
+  /** 获取当前配对码（供 TV 界面显示） */
+  public getPairingCode(): string {
+    return this.pairingCode;
+  }
+
+  private isPairingValid(request: { headers?: Record<string, string> }): boolean {
+    const headers = request.headers || {};
+    // 头部名做大小写不敏感匹配
+    const code = headers["x-pairing-code"] || headers["X-Pairing-Code"] || "";
+    return code === this.pairingCode && this.pairingCode !== "";
   }
 
   private setupRequestHandler() {
@@ -65,12 +119,21 @@ class RemoteControlService {
 
       try {
         if (request.method === "GET" && request.url === "/") {
+          // 已配对过的浏览器（sessionStorage 有码）直接进输入页，否则显示配对页
+          // 服务端无法知道浏览器状态，统一返回配对页，由前端 sessionStorage 决定
           return {
             statusCode: 200,
             headers: { "Content-Type": "text/html; charset=utf-8" },
-            body: getRemotePageHTML(),
+            body: getRemotePageHTML(false),
           };
         } else if (request.method === "POST" && request.url === "/message") {
+          if (!this.isPairingValid(request)) {
+            return {
+              statusCode: 403,
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ error: "Invalid pairing code" }),
+            };
+          }
           try {
             const parsedBody = JSON.parse(request.body || "{}");
             const message = parsedBody.message;
@@ -91,6 +154,13 @@ class RemoteControlService {
             };
           }
         } else if (request.method === "POST" && request.url === "/handshake") {
+          if (!this.isPairingValid(request)) {
+            return {
+              statusCode: 403,
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ error: "Invalid pairing code" }),
+            };
+          }
           this.onHandshake();
           return {
             statusCode: 200,
@@ -124,6 +194,9 @@ class RemoteControlService {
     logger.debug("[RemoteControl] Attempting to start server...");
 
     try {
+      // 每次启动生成新的配对码
+      this.pairingCode = this.generatePairingCode();
+      logger.debug(`[RemoteControl] Pairing code generated`);
       const url = await this.httpServer.start();
       logger.debug(`[RemoteControl] Server started successfully at: ${url}`);
       return url;
@@ -135,6 +208,7 @@ class RemoteControlService {
 
   public stopServer() {
     logger.debug("[RemoteControl] Stopping server...");
+    this.pairingCode = "";
     this.httpServer.stop();
   }
 

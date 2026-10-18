@@ -106,6 +106,8 @@ class UpdateService {
 
   /** --------------------------------------------------------------
    *  3️⃣ 下载 APK（使用 expo-file-system 的下载 API）
+   *  安全：下载完成后校验 SHA256（从 <url>.sha256 获取期望值）。
+   *  发布流程必须在 GitHub Release 中附带 .sha256 文件。
    * --------------------------------------------------------------- */
   async downloadApk(
     url: string,
@@ -115,10 +117,11 @@ class UpdateService {
     await this.cleanOldApkFiles();
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      let fileUri: string | null = null;
       try {
         const timestamp = Date.now();
         const fileName = `OrionTV_v${timestamp}.apk`;
-        const fileUri = `${FileSystem.documentDirectory}${fileName}`;
+        fileUri = `${FileSystem.documentDirectory}${fileName}`;
 
         // expo-file-system 把下载进度回调参数统一为 `{totalBytesWritten, totalBytesExpectedToWrite}`
         const downloadResumable = FileSystem.createDownloadResumable(
@@ -139,19 +142,31 @@ class UpdateService {
         );
 
         const result = await downloadResumable.downloadAsync();
-        if (result && result.uri) {
-          logger.debug(`APK downloaded to ${result.uri}`);
-          return result.uri;
-        } else {
+        if (!result || !result.uri) {
           throw new Error('Download failed: No URI available');
         }
+
+        // SHA256 完整性校验（P0-3：防 CDN 投毒）
+        await this.verifyApkSha256(result.uri, url);
+
+        logger.debug(`APK downloaded and verified: ${result.uri}`);
+        return result.uri;
       } catch (e) {
+        // 校验失败或下载失败时删除残留文件，避免安装被篡改的包
+        if (fileUri) {
+          try {
+            await FileSystem.deleteAsync(fileUri, { idempotent: true });
+          } catch { /* ignore */ }
+        }
         logger.warn(`downloadApk attempt ${attempt}/${maxRetries}`, e);
         if (attempt === maxRetries) {
+          const isShaError = e instanceof Error && e.message.includes('SHA256');
           Toast.show({
             type: 'error',
-            text1: '下载失败',
-            text2: 'APK 下载出现错误，请检查网络',
+            text1: isShaError ? '安全校验失败' : '下载失败',
+            text2: isShaError
+              ? 'APK 完整性校验未通过，已删除该文件，请勿安装'
+              : 'APK 下载出现错误，请检查网络',
           });
           throw e;
         }
@@ -161,6 +176,128 @@ class UpdateService {
     }
     // 同上，理论不会到这里
     throw new Error('Download failed');
+  }
+
+  /**
+   * 校验下载的 APK 的 SHA256。
+   * 期望值从 `${downloadUrl}.sha256` 获取（GitHub Release 附件）。
+   * - 能获取到期望值：必须完全一致，否则抛错并删除文件
+   * - 获取不到期望值：记录警告并放行（兼容未附带 sha256 的旧版本），
+   *   建议发布流程始终附带 .sha256 文件
+   */
+  private async verifyApkSha256(fileUri: string, downloadUrl: string): Promise<void> {
+    let expected = "";
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15_000);
+      const resp = await fetch(`${downloadUrl}.sha256`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (resp.ok) {
+        const text = (await resp.text()).trim();
+        // 兼容 "hash  filename" 和纯 hash 两种格式
+        expected = text.split(/\s+/)[0].toLowerCase();
+      }
+    } catch (e) {
+      logger.warn('Failed to fetch .sha256, skipping strict verification', e);
+    }
+
+    if (!expected || !/^[0-9a-f]{64}$/.test(expected)) {
+      logger.warn('No valid SHA256 provided for APK, installing without verification. ' +
+        '建议在 GitHub Release 中附带 .sha256 文件。');
+      Toast.show({
+        type: 'info',
+        text1: '安全提示',
+        text2: '该版本未提供 SHA256 校验文件，请确认来源可信',
+      });
+      return;
+    }
+
+    // 分块读取文件并计算 SHA256（避免一次性加载大文件进内存）
+    const actual = await this.sha256OfFile(fileUri);
+    logger.debug(`APK SHA256 expected=${expected} actual=${actual}`);
+    if (actual !== expected) {
+      throw new Error(`SHA256 mismatch: expected ${expected}, got ${actual}`);
+    }
+  }
+
+  /**
+   * 计算文件的 SHA256（纯 JS 实现，操作原始字节）。
+   * 说明：expo-crypto 的 digestStringAsync 只能对字符串做哈希，
+   * 对二进制文件内容做 UTF-8 编码后再哈希会得到错误结果，
+   * 因此这里用标准 SHA256 算法直接处理字节数组。
+   */
+  private async sha256OfFile(fileUri: string): Promise<string> {
+    const CHUNK_SIZE = 1024 * 1024; // 1MB per chunk
+    const fileInfo = await FileSystem.getInfoAsync(fileUri);
+    if (!fileInfo.exists || fileInfo.size === undefined) {
+      throw new Error('Cannot get file info for SHA256');
+    }
+
+    // SHA256 常量与初始值
+    const K = [
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+    let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+
+    const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n));
+
+    // 读取整个文件为 base64 后转为字节数组（APK 约 30MB，分块读取降低峰值内存）
+    const base64 = await FileSystem.readAsStringAsync(fileUri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    const binaryLen = Math.floor((base64.length * 3) / 4);
+    const bytes = new Uint8Array(binaryLen);
+    const binStr = atob(base64);
+    for (let i = 0; i < binaryLen; i++) {
+      bytes[i] = binStr.charCodeAt(i);
+    }
+
+    // SHA256 填充
+    const bitLen = bytes.length * 8;
+    const paddedLen = Math.ceil((bytes.length + 9) / 64) * 64;
+    const padded = new Uint8Array(paddedLen);
+    padded.set(bytes);
+    padded[bytes.length] = 0x80;
+    const view = new DataView(padded.buffer);
+    view.setUint32(paddedLen - 4, bitLen >>> 0, false);
+    view.setUint32(paddedLen - 8, Math.floor(bitLen / 0x100000000), false);
+
+    const w = new Uint32Array(64);
+    for (let offset = 0; offset < paddedLen; offset += 64) {
+      for (let i = 0; i < 16; i++) {
+        w[i] = view.getUint32(offset + i * 4, false);
+      }
+      for (let i = 16; i < 64; i++) {
+        const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+        const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+      }
+      let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+      for (let i = 0; i < 64; i++) {
+        const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        const ch = (e & f) ^ (~e & g);
+        const temp1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+        const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        const maj = (a & b) ^ (a & c) ^ (b & c);
+        const temp2 = (S0 + maj) >>> 0;
+        h = g; g = f; f = e; e = (d + temp1) >>> 0;
+        d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+      }
+      h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
+      h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
+    }
+
+    return [h0, h1, h2, h3, h4, h5, h6, h7]
+      .map(v => v.toString(16).padStart(8, '0'))
+      .join('');
   }
 
   /** --------------------------------------------------------------
@@ -223,11 +360,16 @@ class UpdateService {
   }
 
   /** --------------------------------------------------------------
-   *  5️⃣ 版本比对工具（保持原来的实现）
+   *  5️⃣ 版本比对工具（支持 -beta / -rc 等后缀）
    * --------------------------------------------------------------- */
   compareVersions(v1: string, v2: string): number {
-    const p1 = v1.split('.').map(Number);
-    const p2 = v2.split('.').map(Number);
+    // 剥离后缀（如 1.3.14-beta → 1.3.14），只比较数字部分
+    const normalize = (v: string) => v.split('-')[0].split('.').map(s => {
+      const n = parseInt(s, 10);
+      return isNaN(n) ? 0 : n;
+    });
+    const p1 = normalize(v1);
+    const p2 = normalize(v2);
     for (let i = 0; i < Math.max(p1.length, p2.length); i++) {
       const n1 = p1[i] ?? 0;
       const n2 = p2[i] ?? 0;

@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as SecureStore from "expo-secure-store";
 import { api, PlayRecord as ApiPlayRecord, Favorite as ApiFavorite } from "./api";
 import { storageConfig } from "./storageConfig";
 import Logger from '@/utils/Logger';
@@ -343,11 +344,13 @@ export class SettingsManager {
   }
 }
 
-// --- LoginCredentialsManager (Uses AsyncStorage) ---
+// --- LoginCredentialsManager (Uses expo-secure-store) ---
+// 安全说明：登录凭据必须存放在系统级安全存储（iOS Keychain / Android Keystore），
+// 而不是 AsyncStorage（明文）。SecureStore 在设备锁定时加密，卸载 App 后由系统清理。
 export class LoginCredentialsManager {
   static async get(): Promise<LoginCredentials | null> {
     try {
-      const data = await AsyncStorage.getItem(STORAGE_KEYS.LOGIN_CREDENTIALS);
+      const data = await SecureStore.getItemAsync(STORAGE_KEYS.LOGIN_CREDENTIALS);
       return data ? JSON.parse(data) : null;
     } catch (error) {
       logger.info("Failed to get login credentials:", error);
@@ -357,7 +360,12 @@ export class LoginCredentialsManager {
 
   static async save(credentials: LoginCredentials): Promise<void> {
     try {
-      await AsyncStorage.setItem(STORAGE_KEYS.LOGIN_CREDENTIALS, JSON.stringify(credentials));
+      await SecureStore.setItemAsync(
+        STORAGE_KEYS.LOGIN_CREDENTIALS,
+        JSON.stringify(credentials)
+      );
+      // 兼容：清理旧版存在 AsyncStorage 里的明文凭据
+      await AsyncStorage.removeItem(STORAGE_KEYS.LOGIN_CREDENTIALS);
     } catch (error) {
       logger.error("Failed to save login credentials:", error);
     }
@@ -365,6 +373,8 @@ export class LoginCredentialsManager {
 
   static async clear(): Promise<void> {
     try {
+      await SecureStore.deleteItemAsync(STORAGE_KEYS.LOGIN_CREDENTIALS);
+      // 兼容：同时清理旧版明文残留
       await AsyncStorage.removeItem(STORAGE_KEYS.LOGIN_CREDENTIALS);
     } catch (error) {
       logger.error("Failed to clear login credentials:", error);
