@@ -61,7 +61,7 @@ const getRemotePageHTML = (paired: boolean) => {
           } else {
             alert("配对码错误，请重试");
           }
-        }).catch(err => logger.warn('Pair failed:', err));
+        }).catch(err => console.warn('Pair failed:', err));
       }
       function send() {
         const input = document.getElementById("text");
@@ -72,7 +72,7 @@ const getRemotePageHTML = (paired: boolean) => {
             headers: { 'Content-Type': 'application/json', 'X-Pairing-Code': pairingCode },
             body: JSON.stringify({ message: value })
           })
-          .catch(err => logger.warn('Message send failed:', err));
+          .catch(err => console.warn('Message send failed:', err));
           input.value = '';
         }
       }

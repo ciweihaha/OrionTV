@@ -71,6 +71,7 @@ class TCPHttpServer {
     const statusTexts: { [key: number]: string } = {
       200: 'OK',
       400: 'Bad Request',
+      403: 'Forbidden',
       404: 'Not Found',
       500: 'Internal Server Error'
     };
@@ -122,9 +123,17 @@ class TCPHttpServer {
           
           let requestData = '';
           
+          // 请求体上限 1MB，防恶意客户端无限发送耗尽内存
+          const MAX_REQUEST_BYTES = 1024 * 1024;
           socket.on('data', async (data: string | Buffer) => {
             requestData += data.toString();
-            
+            if (requestData.length > MAX_REQUEST_BYTES) {
+              logger.error('[TCPHttpServer] Request too large, closing connection');
+              socket.end();
+              requestData = '';
+              return;
+            }
+
             // Check if we have a complete HTTP request
             if (requestData.includes('\r\n\r\n')) {
               try {
