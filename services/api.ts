@@ -291,7 +291,7 @@ export class API {
     const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, "");
     const normalizedQuery = normalize(query);
     return {
-      results: results.filter((item: any) =>
+      results: (results as SearchResult[]).filter((item: SearchResult) =>
         item.title && normalize(item.title).includes(normalizedQuery)
       ),
     };

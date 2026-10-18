@@ -361,15 +361,16 @@ class UpdateService {
           type: ANDROID_MIME_TYPE,   // application/vnd.android.package-archive
           flags,
         });
-      } catch (e: any) {
+      } catch (e) {
         // 统一错误提示
-        if (e.message?.includes('Activity not found')) {
+        const errMsg = e instanceof Error ? e.message : String(e);
+        if (errMsg.includes('Activity not found')) {
           Toast.show({
             type: 'error',
             text1: '安装失败',
             text2: '系统没有找到可以打开 APK 的应用，请检查系统设置',
           });
-        } else if (e.message?.includes('permission')) {
+        } else if (errMsg.includes('permission')) {
           Toast.show({
             type: 'error',
             text1: '安装失败',

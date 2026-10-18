@@ -197,15 +197,18 @@ const usePlayerStore = create<PlayerState>((set, get) => ({
     
     logger.info(`[SUCCESS] Final validation passed - detail: ${detail.source_name}, episodes: ${episodes.length}`);
 
+    // 验证后 detail 非空，赋值给常量避免后续非空断言
+    const validDetail = detail;
+
     try {
       const storageStart = performance.now();
       logger.info(`[PERF] Storage operations START`);
       
-      const playRecord = await PlayRecordManager.get(detail!.source, detail!.id.toString());
+      const playRecord = await PlayRecordManager.get(validDetail.source, validDetail.id.toString());
       const storagePlayRecordEnd = performance.now();
       logger.info(`[PERF] PlayRecordManager.get took ${(storagePlayRecordEnd - storageStart).toFixed(2)}ms`);
       
-      const playerSettings = await PlayerSettingsManager.get(detail!.source, detail!.id.toString());
+      const playerSettings = await PlayerSettingsManager.get(validDetail.source, validDetail.id.toString());
       const storageEnd = performance.now();
       logger.info(`[PERF] PlayerSettingsManager.get took ${(storageEnd - storagePlayRecordEnd).toFixed(2)}ms`);
       logger.info(`[PERF] Total storage operations took ${(storageEnd - storageStart).toFixed(2)}ms`);
