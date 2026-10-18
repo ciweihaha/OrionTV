@@ -54,9 +54,14 @@ export const parseM3U = (m3uText: string): Channel[] => {
   return parsedChannels;
 };
 
+// M3U 拉取超时（毫秒）
+const M3U_FETCH_TIMEOUT_MS = 15_000;
+
 export const fetchAndParseM3u = async (m3uUrl: string): Promise<Channel[]> => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), M3U_FETCH_TIMEOUT_MS);
   try {
-    const response = await fetch(m3uUrl);
+    const response = await fetch(m3uUrl, { signal: controller.signal });
     if (!response.ok) {
       throw new Error(`Failed to fetch M3U: ${response.statusText}`);
     }
@@ -65,6 +70,8 @@ export const fetchAndParseM3u = async (m3uUrl: string): Promise<Channel[]> => {
   } catch (error) {
     logger.info("Error fetching or parsing M3U:", error);
     return []; // Return empty array on error
+  } finally {
+    clearTimeout(timeoutId);
   }
 };
 

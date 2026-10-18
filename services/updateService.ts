@@ -226,10 +226,12 @@ class UpdateService {
   }
 
   /**
-   * 计算文件的 SHA256（纯 JS 实现，操作原始字节）。
+   * 计算文件的 SHA256（纯 JS 实现，真流式分块读取）。
    * 说明：expo-crypto 的 digestStringAsync 只能对字符串做哈希，
    * 对二进制文件内容做 UTF-8 编码后再哈希会得到错误结果，
    * 因此这里用标准 SHA256 算法直接处理字节数组。
+   * 实现为增量式：每次读取 1MB base64 块，解码后送入哈希状态，
+   * 峰值内存与文件大小无关。
    */
   private async sha256OfFile(fileUri: string): Promise<string> {
     const CHUNK_SIZE = 1024 * 1024; // 1MB per chunk
@@ -237,6 +239,7 @@ class UpdateService {
     if (!fileInfo.exists || fileInfo.size === undefined) {
       throw new Error('Cannot get file info for SHA256');
     }
+    const fileSize = fileInfo.size;
 
     // SHA256 常量与初始值
     const K = [
@@ -253,32 +256,11 @@ class UpdateService {
     let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
 
     const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n));
-
-    // 读取整个文件为 base64 后转为字节数组（APK 约 30MB，分块读取降低峰值内存）
-    const base64 = await FileSystem.readAsStringAsync(fileUri, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
-    const binaryLen = Math.floor((base64.length * 3) / 4);
-    const bytes = new Uint8Array(binaryLen);
-    const binStr = atob(base64);
-    for (let i = 0; i < binaryLen; i++) {
-      bytes[i] = binStr.charCodeAt(i);
-    }
-
-    // SHA256 填充
-    const bitLen = bytes.length * 8;
-    const paddedLen = Math.ceil((bytes.length + 9) / 64) * 64;
-    const padded = new Uint8Array(paddedLen);
-    padded.set(bytes);
-    padded[bytes.length] = 0x80;
-    const view = new DataView(padded.buffer);
-    view.setUint32(paddedLen - 4, bitLen >>> 0, false);
-    view.setUint32(paddedLen - 8, Math.floor(bitLen / 0x100000000), false);
-
     const w = new Uint32Array(64);
-    for (let offset = 0; offset < paddedLen; offset += 64) {
+    const processBlock = (block: Uint8Array) => {
+      const view = new DataView(block.buffer, block.byteOffset, 64);
       for (let i = 0; i < 16; i++) {
-        w[i] = view.getUint32(offset + i * 4, false);
+        w[i] = view.getUint32(i * 4, false);
       }
       for (let i = 16; i < 64; i++) {
         const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
@@ -298,7 +280,56 @@ class UpdateService {
       }
       h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
       h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
+    };
+
+    // 增量读取： leftover 保存不足 64 字节的尾部
+    let leftover = new Uint8Array(0);
+    let processedBytes = 0;
+    for (let offset = 0; offset < fileSize; offset += CHUNK_SIZE) {
+      const len = Math.min(CHUNK_SIZE, fileSize - offset);
+      const base64 = await FileSystem.readAsStringAsync(fileUri, {
+        encoding: FileSystem.EncodingType.Base64,
+        position: offset,
+        length: len,
+      });
+      const binaryLen = Math.floor((base64.length * 3) / 4);
+      const chunk = new Uint8Array(binaryLen);
+      const binStr = atob(base64);
+      for (let i = 0; i < binaryLen; i++) {
+        chunk[i] = binStr.charCodeAt(i);
+      }
+      // 拼接 leftover + chunk，按 64 字节块处理
+      const combined = new Uint8Array(leftover.length + chunk.length);
+      combined.set(leftover);
+      combined.set(chunk, leftover.length);
+      const fullBlocks = Math.floor(combined.length / 64);
+      for (let b = 0; b < fullBlocks; b++) {
+        processBlock(combined.subarray(b * 64, b * 64 + 64));
+      }
+      leftover = combined.subarray(fullBlocks * 64);
+      processedBytes += chunk.length;
     }
+
+    // SHA256 填充：0x80 + 0* + 64-bit 长度
+    const bitLen = fileSize * 8;
+    const padding = new Uint8Array(leftover.length + 1 + 8);
+    padding.set(leftover);
+    padding[leftover.length] = 0x80;
+    // 长度写入最后 8 字节（大端）
+    const dv = new DataView(padding.buffer);
+    dv.setUint32(padding.length - 4, bitLen >>> 0, false);
+    dv.setUint32(padding.length - 8, Math.floor(bitLen / 0x100000000), false);
+    // 如果 leftover+9 > 64，需要补一个块
+    let padOffset = 0;
+    if (leftover.length + 9 > 64) {
+      const first = new Uint8Array(64);
+      first.set(padding.subarray(0, 64));
+      processBlock(first);
+      padOffset = 64;
+    }
+    const last = new Uint8Array(64);
+    last.set(padding.subarray(padOffset));
+    processBlock(last);
 
     return [h0, h1, h2, h3, h4, h5, h6, h7]
       .map(v => v.toString(16).padStart(8, '0'))
