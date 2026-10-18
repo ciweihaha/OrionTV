@@ -24,6 +24,11 @@ const ANDROID_MIME_TYPE = 'application/vnd.android.package-archive';
 const VERSION_CHECK_TIMEOUT_MS = 10_000;
 /** SHA256 文件获取超时（毫秒） */
 const SHA256_FETCH_TIMEOUT_MS = 15_000;
+/**
+ * APK 下载体积上限（200MB）：防被投毒/劫持的 CDN 返回超大文件占满设备存储。
+ * 正常 release APK 约几十 MB，200MB 已留足余量。
+ */
+const MAX_APK_DOWNLOAD_BYTES = 200 * 1024 * 1024;
 
 class UpdateService {
   private static instance: UpdateService;
@@ -109,6 +114,27 @@ class UpdateService {
     }
   }
 
+  /**
+   * 下载前用 HEAD 请求预检 APK 体积，超限直接拒绝，避免下载超大恶意文件。
+   * 拿不到 Content-Length 时放行（由下载进度回调兜底）。
+   */
+  private async assertApkSizeAcceptable(url: string): Promise<void> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), SHA256_FETCH_TIMEOUT_MS);
+    try {
+      const resp = await fetch(url, { method: 'HEAD', signal: controller.signal });
+      const len = resp.headers.get('content-length');
+      if (len) {
+        const bytes = parseInt(len, 10);
+        if (!Number.isNaN(bytes) && bytes > MAX_APK_DOWNLOAD_BYTES) {
+          throw new Error(`APK_TOO_LARGE: declared ${bytes} bytes`);
+        }
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
   /** --------------------------------------------------------------
    *  3️⃣ 下载 APK（使用 expo-file-system 的下载 API）
    *  安全：下载完成后校验 SHA256（从 <url>.sha256 获取期望值）。
@@ -128,6 +154,9 @@ class UpdateService {
         const fileName = `OrionTV_v${timestamp}.apk`;
         fileUri = `${FileSystem.documentDirectory}${fileName}`;
 
+        // 下载前先 HEAD 预检体积：被劫持的 CDN 可能返回超大文件
+        await this.assertApkSizeAcceptable(url);
+
         // expo-file-system 把下载进度回调参数统一为 `{totalBytesWritten, totalBytesExpectedToWrite}`
         const downloadResumable = FileSystem.createDownloadResumable(
           url,
@@ -136,7 +165,12 @@ class UpdateService {
             // Android 需要在 AndroidManifest 中声明 INTERNET、WRITE_EXTERNAL_STORAGE (API 33+ 使用 MANAGE_EXTERNAL_STORAGE)
             // 这里不使用系统下载管理器，因为我们想自己控制进度回调。
           },
-          progress => {
+          async progress => {
+            if (progress.totalBytesWritten > MAX_APK_DOWNLOAD_BYTES) {
+              logger.warn(`APK download exceeded ${MAX_APK_DOWNLOAD_BYTES} bytes, aborting`);
+              await downloadResumable.pauseAsync();
+              throw new Error('APK_TOO_LARGE');
+            }
             if (onProgress && progress.totalBytesExpectedToWrite) {
               const percent = Math.floor(
                 (progress.totalBytesWritten / progress.totalBytesExpectedToWrite) * 100,
@@ -164,6 +198,15 @@ class UpdateService {
           } catch { /* ignore */ }
         }
         logger.warn(`downloadApk attempt ${attempt}/${maxRetries}`, e);
+        // 体积超限是确定性失败，不重试
+        if (e instanceof Error && e.message.includes('APK_TOO_LARGE')) {
+          Toast.show({
+            type: 'error',
+            text1: '下载文件过大',
+            text2: 'APK 体积超过安全上限，已取消下载',
+          });
+          throw e;
+        }
         if (attempt === maxRetries) {
           const isShaError = e instanceof Error && e.message.includes('SHA256');
           Toast.show({

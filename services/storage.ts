@@ -51,6 +51,9 @@ export interface LoginCredentials {
 const generateKey = (source: string, id: string) => `${source}+${id}`;
 
 // --- PlayerSettingsManager (Uses AsyncStorage) ---
+/** 播放器个性化设置上限（仅用户自定义过片头/片尾/倍速的条目才会写入） */
+const MAX_PLAYER_SETTINGS = 200;
+
 export class PlayerSettingsManager {
   static async getAll(): Promise<Record<string, PlayerSettings>> {
     try {
@@ -81,6 +84,11 @@ export class PlayerSettingsManager {
     // Only save if there are actual values to save
     if (settings.introEndTime !== undefined || settings.outroStartTime !== undefined || settings.playbackRate !== undefined) {
       allSettings[key] = { ...allSettings[key], ...settings };
+      // 超限时按插入顺序淘汰最旧条目（字符串 key 保持插入序）
+      const keys = Object.keys(allSettings);
+      if (keys.length > MAX_PLAYER_SETTINGS) {
+        keys.slice(0, keys.length - MAX_PLAYER_SETTINGS).forEach((k) => delete allSettings[k]);
+      }
     } else {
       // If all are undefined, remove the key
       delete allSettings[key];
@@ -171,6 +179,9 @@ export class FavoriteManager {
 }
 
 // --- PlayRecordManager (Dynamic: API or LocalStorage) ---
+/** 本地播放记录上限：防止 AsyncStorage 无限增长（Android 单 key 约 6MB 上限） */
+const MAX_PLAY_RECORDS = 200;
+
 export class PlayRecordManager {
   private static getStorageType() {
     return storageConfig.getStorageType();
@@ -226,6 +237,14 @@ export class PlayRecordManager {
       const allRecords = await this.getAll();
       const fullRecord = { ...apiRecord, save_time: Date.now() };
       allRecords[key] = { ...allRecords[key], ...fullRecord };
+      // 超限时按 save_time 淘汰最旧的记录
+      const keys = Object.keys(allRecords);
+      if (keys.length > MAX_PLAY_RECORDS) {
+        keys
+          .sort((a, b) => (allRecords[a].save_time || 0) - (allRecords[b].save_time || 0))
+          .slice(0, keys.length - MAX_PLAY_RECORDS)
+          .forEach((k) => delete allRecords[k]);
+      }
       await AsyncStorage.setItem(STORAGE_KEYS.PLAY_RECORDS, JSON.stringify(allRecords));
     } else {
       await api.savePlayRecord(key, apiRecord);

@@ -88,6 +88,11 @@ class RemoteControlService {
   private onHandshake: () => void = () => {};
   // 配对码：每次启动服务器时重新生成，防止局域网未授权访问
   private pairingCode: string = "";
+  /** 防暴力破解：连续失败 5 次后锁定 60 秒 */
+  private static readonly MAX_PAIRING_ATTEMPTS = 5;
+  private static readonly PAIRING_LOCKOUT_MS = 60_000;
+  private failedPairingAttempts = 0;
+  private pairingLockoutUntil = 0;
 
   constructor() {
     this.httpServer = new TCPHttpServer();
@@ -117,10 +122,25 @@ class RemoteControlService {
   }
 
   private isPairingValid(request: { headers?: Record<string, string> }): boolean {
+    // 锁定期内直接拒绝，不做比较（防计时/枚举）
+    if (Date.now() < this.pairingLockoutUntil) {
+      return false;
+    }
     const headers = request.headers || {};
     // 头部名做大小写不敏感匹配
     const code = headers["x-pairing-code"] || headers["X-Pairing-Code"] || "";
-    return code === this.pairingCode && this.pairingCode !== "";
+    const valid = code === this.pairingCode && this.pairingCode !== "";
+    if (valid) {
+      this.failedPairingAttempts = 0;
+    } else {
+      this.failedPairingAttempts += 1;
+      if (this.failedPairingAttempts >= RemoteControlService.MAX_PAIRING_ATTEMPTS) {
+        this.pairingLockoutUntil = Date.now() + RemoteControlService.PAIRING_LOCKOUT_MS;
+        this.failedPairingAttempts = 0;
+        logger.info("[RemoteControl] Pairing locked out for 60s after repeated failures");
+      }
+    }
+    return valid;
   }
 
   private setupRequestHandler() {
@@ -216,6 +236,8 @@ class RemoteControlService {
     try {
       // 每次启动生成新的配对码
       this.pairingCode = this.generatePairingCode();
+      this.failedPairingAttempts = 0;
+      this.pairingLockoutUntil = 0;
       logger.debug(`[RemoteControl] Pairing code generated`);
       const url = await this.httpServer.start();
       logger.debug(`[RemoteControl] Server started successfully at: ${url}`);
