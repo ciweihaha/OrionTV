@@ -95,12 +95,6 @@ export const useResponsiveLayout = (): ResponsiveConfig => {
   return getLayoutConfig(deviceType, width, height, isPortrait);
 };
 
-// Utility hook for responsive values
-export const useResponsiveValue = <T>(values: { mobile: T; tablet: T; tv: T }): T => {
-  const { deviceType } = useResponsiveLayout();
-  return values[deviceType];
-};
-
 // Utility hook for responsive styles
 export const useResponsiveStyles = () => {
   const config = useResponsiveLayout();

@@ -22,6 +22,11 @@ interface AuthState {
 // 并发去重：多个请求同时 401 时只触发一次自动登录
 let restorePromise: Promise<void> | null = null;
 
+/** 登录状态检查：服务器配置拉取重试的最大次数 */
+const SERVER_CONFIG_MAX_ATTEMPTS = 3;
+/** 登录状态检查：服务器配置拉取重试前的等待时间（毫秒） */
+const SERVER_CONFIG_RETRY_DELAY_MS = 1000;
+
 const useAuthStore = create<AuthState>((set, get) => ({
   isLoggedIn: false,
   isLoginModalVisible: false,
@@ -37,11 +42,10 @@ const useAuthStore = create<AuthState>((set, get) => ({
       // 因此最多重试几次（每次间隔短暂等待），拿到 StorageType 才继续；全部失败才提示。
       // 直接 await 真实请求（不用固定超时轮询），既处理"慢"也处理"第一次失败"。
       let serverConfig = useSettingsStore.getState().serverConfig;
-      const maxAttempts = 3;
-      for (let attempt = 0; attempt < maxAttempts && !serverConfig?.StorageType; attempt++) {
+      for (let attempt = 0; attempt < SERVER_CONFIG_MAX_ATTEMPTS && !serverConfig?.StorageType; attempt++) {
         if (attempt > 0) {
           // 重试前短暂等待，给冷启动的网络/服务器一点时间就绪
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+          await new Promise((resolve) => setTimeout(resolve, SERVER_CONFIG_RETRY_DELAY_MS));
         }
         if (useSettingsStore.getState().isLoadingServerConfig) {
           // 已在加载：直接 await 正在进行的请求 Promise，等它真正完成

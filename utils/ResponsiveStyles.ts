@@ -1,30 +1,6 @@
 import { StyleSheet } from 'react-native';
-import { useResponsiveLayout, ResponsiveConfig } from '@/hooks/useResponsiveLayout';
+import { ResponsiveConfig } from '@/hooks/useResponsiveLayout';
 import { DeviceUtils } from '@/utils/DeviceUtils';
-
-// 响应式样式创建器类型
-export type ResponsiveStyleCreator<T> = (config: ResponsiveConfig) => T;
-
-/**
- * 创建响应式样式的高阶函数
- */
-export const createResponsiveStyles = <T extends Record<string, any>>(
-  styleCreator: ResponsiveStyleCreator<T>
-) => {
-  return (config: ResponsiveConfig): T => {
-    return StyleSheet.create(styleCreator(config)) as T;
-  };
-};
-
-/**
- * 响应式样式 Hook
- */
-export const useResponsiveStyles = <T extends Record<string, any>>(
-  styleCreator: ResponsiveStyleCreator<T>
-): T => {
-  const config = useResponsiveLayout();
-  return createResponsiveStyles(styleCreator)(config);
-};
 
 /**
  * 通用响应式样式
@@ -191,32 +167,3 @@ export const getCommonResponsiveStyles = (config: ResponsiveConfig) => {
   });
 };
 
-/**
- * 响应式文本大小
- */
-export const getResponsiveTextSize = (baseSize: number, deviceType: string) => {
-  const scaleFactors = {
-    mobile: 1.0,
-    tablet: 1.1,
-    tv: 1.25,
-  };
-  
-  const scaleFactor = scaleFactors[deviceType as keyof typeof scaleFactors] || 1.0;
-  
-  return Math.round(baseSize * scaleFactor);
-};
-
-/**
- * 响应式间距
- */
-export const getResponsiveSpacing = (baseSpacing: number, deviceType: string) => {
-  const scaleFactors = {
-    mobile: 0.8,
-    tablet: 1.0,
-    tv: 1.5,
-  };
-  
-  const scaleFactor = scaleFactors[deviceType as keyof typeof scaleFactors] || 1.0;
-  
-  return Math.round(baseSpacing * scaleFactor);
-};

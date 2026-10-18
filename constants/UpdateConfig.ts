@@ -20,9 +20,6 @@ export const UPDATE_CONFIG = {
   // 是否允许跳过版本
   ALLOW_SKIP_VERSION: true,
 
-  // 下载超时时间（毫秒）
-  DOWNLOAD_TIMEOUT: 10 * 60 * 1000, // 10分钟
-
   // 是否在WIFI下自动下载
   AUTO_DOWNLOAD_ON_WIFI: false,
 
