@@ -93,7 +93,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
         Date.now().toString()
       );
     } catch (error) {
-      // console.info('检查更新失败:', error);
+      logger.warn('检查更新失败:', error);
       set({ 
         error: error instanceof Error ? error.message : '检查更新失败',
         updateAvailable: false,
@@ -131,7 +131,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
         downloadProgress: 100,
       });
     } catch (error) {
-      // console.info('下载失败:', error);
+      logger.warn('下载失败:', error);
       set({ 
         downloading: false,
         downloadProgress: 0,

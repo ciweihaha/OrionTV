@@ -1,7 +1,6 @@
 // UpdateService.ts
 import * as FileSystem from 'expo-file-system';
 import * as IntentLauncher from 'expo-intent-launcher';
-// import * as Device from 'expo-device';
 import Toast from 'react-native-toast-message';
 import { version as currentVersion } from '../package.json';
 import { UPDATE_CONFIG } from '../constants/UpdateConfig';
@@ -29,6 +28,12 @@ const SHA256_FETCH_TIMEOUT_MS = 15_000;
  * 正常 release APK 约几十 MB，200MB 已留足余量。
  */
 const MAX_APK_DOWNLOAD_BYTES = 200 * 1024 * 1024;
+/** 更新相关网络操作的最大重试次数 */
+const UPDATE_MAX_RETRIES = 3;
+/** 版本检查重试退避基数（毫秒，实际延迟 = 基数 × 第几次重试） */
+const VERSION_CHECK_RETRY_BASE_DELAY_MS = 2_000;
+/** APK 下载重试退避基数（毫秒，实际延迟 = 基数 × 第几次重试） */
+const APK_DOWNLOAD_RETRY_BASE_DELAY_MS = 3_000;
 
 class UpdateService {
   private static instance: UpdateService;
@@ -43,8 +48,7 @@ class UpdateService {
    *  1️⃣ 远程版本检查（保持不变，只是把 fetch 包装成 async/await）
    * --------------------------------------------------------------- */
   async checkVersion(): Promise<VersionInfo> {
-    const maxRetries = 3;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    for (let attempt = 1; attempt <= UPDATE_MAX_RETRIES; attempt++) {
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), VERSION_CHECK_TIMEOUT_MS);
@@ -62,8 +66,8 @@ class UpdateService {
           downloadUrl: UPDATE_CONFIG.getDownloadUrl(remoteVersion),
         };
       } catch (e) {
-        logger.warn(`checkVersion attempt ${attempt}/${maxRetries}`, e);
-        if (attempt === maxRetries) {
+        logger.warn(`checkVersion attempt ${attempt}/${UPDATE_MAX_RETRIES}`, e);
+        if (attempt === UPDATE_MAX_RETRIES) {
           Toast.show({
             type: 'error',
             text1: '检查更新失败',
@@ -72,7 +76,7 @@ class UpdateService {
           throw e;
         }
         // 指数退避
-        await new Promise(r => setTimeout(r, 2_000 * attempt));
+        await new Promise(r => setTimeout(r, VERSION_CHECK_RETRY_BASE_DELAY_MS * attempt));
       }
     }
     // 这句永远走不到，仅为 TypeScript 报错
@@ -144,10 +148,9 @@ class UpdateService {
     url: string,
     onProgress?: (percent: number) => void,
   ): Promise<string> {
-    const maxRetries = 3;
     await this.cleanOldApkFiles();
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    for (let attempt = 1; attempt <= UPDATE_MAX_RETRIES; attempt++) {
       let fileUri: string | null = null;
       try {
         const timestamp = Date.now();
@@ -197,7 +200,7 @@ class UpdateService {
             await FileSystem.deleteAsync(fileUri, { idempotent: true });
           } catch { /* ignore */ }
         }
-        logger.warn(`downloadApk attempt ${attempt}/${maxRetries}`, e);
+        logger.warn(`downloadApk attempt ${attempt}/${UPDATE_MAX_RETRIES}`, e);
         // 体积超限是确定性失败，不重试
         if (e instanceof Error && e.message.includes('APK_TOO_LARGE')) {
           Toast.show({
@@ -207,7 +210,7 @@ class UpdateService {
           });
           throw e;
         }
-        if (attempt === maxRetries) {
+        if (attempt === UPDATE_MAX_RETRIES) {
           const isShaError = e instanceof Error && e.message.includes('SHA256');
           Toast.show({
             type: 'error',
@@ -219,7 +222,7 @@ class UpdateService {
           throw e;
         }
         // 指数退避
-        await new Promise(r => setTimeout(r, 3_000 * attempt));
+        await new Promise(r => setTimeout(r, APK_DOWNLOAD_RETRY_BASE_DELAY_MS * attempt));
       }
     }
     // 同上，理论不会到这里

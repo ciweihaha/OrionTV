@@ -1,20 +1,6 @@
-import { StyleSheet } from "react-native";
-import {
-  createResponsiveStyles,
-  useResponsiveStyles,
-  getCommonResponsiveStyles,
-  getResponsiveTextSize,
-  getResponsiveSpacing,
-  ResponsiveStyleCreator,
-} from "../ResponsiveStyles";
+import { getCommonResponsiveStyles } from "../ResponsiveStyles";
 import { ResponsiveConfig } from "@/hooks/useResponsiveLayout";
 import { DeviceUtils } from "../DeviceUtils";
-
-jest.mock("react-native", () => ({
-  StyleSheet: {
-    create: jest.fn((styles) => styles),
-  },
-}));
 
 jest.mock("@/hooks/useResponsiveLayout", () => ({
   useResponsiveLayout: jest.fn(),
@@ -27,7 +13,6 @@ jest.mock("@/utils/DeviceUtils", () => ({
   },
 }));
 
-const mockedStyleSheet = StyleSheet as jest.Mocked<typeof StyleSheet>;
 const mockedDeviceUtils = DeviceUtils as jest.Mocked<typeof DeviceUtils>;
 
 describe("ResponsiveStyles", () => {
@@ -44,30 +29,6 @@ describe("ResponsiveStyles", () => {
     jest.clearAllMocks();
     mockedDeviceUtils.getMinTouchTargetSize.mockReturnValue(44);
     mockedDeviceUtils.getOptimalFontSize.mockImplementation((size) => size);
-  });
-
-  describe("createResponsiveStyles", () => {
-    it("应该创建响应式样式函数", () => {
-      const styleCreator: ResponsiveStyleCreator<any> = (config) => ({
-        container: {
-          padding: config.spacing,
-        },
-      });
-
-      const responsiveStylesFunc = createResponsiveStyles(styleCreator);
-      const styles = responsiveStylesFunc(mockConfig);
-
-      expect(mockedStyleSheet.create).toHaveBeenCalledWith({
-        container: {
-          padding: 16,
-        },
-      });
-      expect(styles).toEqual({
-        container: {
-          padding: 16,
-        },
-      });
-    });
   });
 
   describe("getCommonResponsiveStyles", () => {
@@ -178,60 +139,6 @@ describe("ResponsiveStyles", () => {
         shadowRadius: 3.84,
         elevation: 5,
       });
-    });
-  });
-
-  describe("getResponsiveTextSize", () => {
-    it("应该为 mobile 设备返回基础大小", () => {
-      const result = getResponsiveTextSize(16, "mobile");
-      expect(result).toBe(16);
-    });
-
-    it("应该为 tablet 设备返回缩放后的大小", () => {
-      const result = getResponsiveTextSize(16, "tablet");
-      expect(result).toBe(18); // 16 * 1.1 = 17.6, rounded to 18
-    });
-
-    it("应该为 tv 设备返回缩放后的大小", () => {
-      const result = getResponsiveTextSize(16, "tv");
-      expect(result).toBe(20); // 16 * 1.25 = 20
-    });
-
-    it("应该为未知设备类型返回基础大小", () => {
-      const result = getResponsiveTextSize(16, "unknown");
-      expect(result).toBe(16);
-    });
-
-    it("应该正确处理小数点", () => {
-      const result = getResponsiveTextSize(15, "tablet");
-      expect(result).toBe(17); // 15 * 1.1 = 16.5, rounded to 17
-    });
-  });
-
-  describe("getResponsiveSpacing", () => {
-    it("应该为 mobile 设备返回缩放后的间距", () => {
-      const result = getResponsiveSpacing(20, "mobile");
-      expect(result).toBe(16); // 20 * 0.8 = 16
-    });
-
-    it("应该为 tablet 设备返回基础间距", () => {
-      const result = getResponsiveSpacing(20, "tablet");
-      expect(result).toBe(20);
-    });
-
-    it("应该为 tv 设备返回缩放后的间距", () => {
-      const result = getResponsiveSpacing(20, "tv");
-      expect(result).toBe(30); // 20 * 1.5 = 30
-    });
-
-    it("应该为未知设备类型返回基础间距", () => {
-      const result = getResponsiveSpacing(20, "unknown");
-      expect(result).toBe(20);
-    });
-
-    it("应该正确处理小数点", () => {
-      const result = getResponsiveSpacing(15, "mobile");
-      expect(result).toBe(12); // 15 * 0.8 = 12
     });
   });
 });

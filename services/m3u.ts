@@ -10,7 +10,7 @@ export interface Channel {
   group: string;
 }
 
-export const parseM3U = (m3uText: string): Channel[] => {
+const parseM3U = (m3uText: string): Channel[] => {
   const parsedChannels: Channel[] = [];
   const lines = m3uText.split('\n');
   let currentChannelInfo: Partial<Channel> | null = null;
@@ -86,16 +86,7 @@ export const getPlayableUrl = (originalUrl: string | null): string | null => {
   if (!originalUrl) {
     return null;
   }
-  // In React Native, we use the proxy for all http streams to avoid potential issues.
-  // if (originalUrl.toLowerCase().startsWith('http://')) {
-  //   // Use the baseURL from the existing api instance.
-  //   if (!api.baseURL) {
-  //       console.warn("API base URL is not set. Cannot create proxy URL.")
-  //       return originalUrl; // Fallback to original URL
-  //   }
-  //   return `${api.baseURL}/proxy?url=${encodeURIComponent(originalUrl)}`;
-  // }
-  // HTTPS streams can be played directly.
+  // 直播流地址直接播放（历史代理方案已下线）。
   return originalUrl;
 };
 
