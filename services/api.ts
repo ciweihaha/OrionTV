@@ -121,7 +121,7 @@ export class API {
         if (this.sessionRestorer && !url.startsWith("/api/login")) {
           const restored = await this.sessionRestorer();
           if (restored) {
-            const retryResponse = await fetch(`${this.baseURL}${url}`, options);
+            const retryResponse = await fetch(`${this.baseURL}${url}`, { ...options, signal });
             if (retryResponse.status === 401) {
               throw new Error("UNAUTHORIZED");
             }
