@@ -121,14 +121,28 @@ export class API {
         if (this.sessionRestorer && !url.startsWith("/api/login")) {
           const restored = await this.sessionRestorer();
           if (restored) {
-            const retryResponse = await fetch(`${this.baseURL}${url}`, { ...options, signal });
-            if (retryResponse.status === 401) {
-              throw new Error("UNAUTHORIZED");
+            // 重试时若原 signal 已中止（如超时），用新的超时 signal，避免重试直接失败
+            let retrySignal = signal;
+            let retryTimeoutId: ReturnType<typeof setTimeout> | undefined;
+            if (signal.aborted) {
+              const retryController = new AbortController();
+              retryTimeoutId = setTimeout(() => retryController.abort(), timeoutMs);
+              retrySignal = retryController.signal;
             }
-            if (!retryResponse.ok) {
-              throw new Error(`HTTP error! status: ${retryResponse.status}`);
+            try {
+              const retryResponse = await fetch(`${this.baseURL}${url}`, { ...options, signal: retrySignal });
+              if (retryResponse.status === 401) {
+                throw new Error("UNAUTHORIZED");
+              }
+              if (!retryResponse.ok) {
+                throw new Error(`HTTP error! status: ${retryResponse.status}`);
+              }
+              return retryResponse;
+            } finally {
+              if (retryTimeoutId) {
+                clearTimeout(retryTimeoutId);
+              }
             }
-            return retryResponse;
           }
         }
         throw new Error("UNAUTHORIZED");
