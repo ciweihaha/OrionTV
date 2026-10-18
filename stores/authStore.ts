@@ -26,11 +26,6 @@ interface AuthState {
 // 并发去重：多个请求同时 401 时只触发一次自动登录
 let restorePromise: Promise<void> | null = null;
 
-/** 登录状态检查：服务器配置拉取重试的最大次数 */
-const SERVER_CONFIG_MAX_ATTEMPTS = 3;
-/** 登录状态检查：服务器配置拉取重试前的等待时间（毫秒） */
-const SERVER_CONFIG_RETRY_DELAY_MS = 1000;
-
 const useAuthStore = create<AuthState>((set, get) => ({
   isLoggedIn: false,
   isLoginModalVisible: false,
@@ -130,6 +125,8 @@ const useAuthStore = create<AuthState>((set, get) => ({
   logout: async () => {
     try {
       await api.logout();
+      // 清除 SecureStore 中的登录凭据，防止"退出"后仍自动登录
+      await LoginCredentialsManager.clear();
       set({ isLoggedIn: false, isLoginModalVisible: true });
     } catch (error) {
       logger.error("Failed to logout:", error);
