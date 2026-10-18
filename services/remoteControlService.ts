@@ -1,4 +1,5 @@
 import TCPHttpServer from "./tcpHttpServer";
+import * as Crypto from "expo-crypto";
 import Logger from '@/utils/Logger';
 
 const logger = Logger.withTag('RemoteControl');
@@ -94,9 +95,18 @@ class RemoteControlService {
   }
 
   private generatePairingCode(): string {
+    // 安全：配对码是局域网访问凭证，必须用密码学安全随机数；
+    // Math.random() 可预测（xorshift128+），此处禁用。
+    // 拒绝采样：丢弃 250-255，消除 %10 的模偏差
     let code = "";
-    for (let i = 0; i < PAIRING_CODE_LENGTH; i++) {
-      code += Math.floor(Math.random() * 10).toString();
+    while (code.length < PAIRING_CODE_LENGTH) {
+      const bytes = Crypto.getRandomBytes(PAIRING_CODE_LENGTH * 2);
+      for (let i = 0; i < bytes.length && code.length < PAIRING_CODE_LENGTH; i++) {
+        const b = bytes[i];
+        if (b < 250) {
+          code += (b % 10).toString();
+        }
+      }
     }
     return code;
   }
