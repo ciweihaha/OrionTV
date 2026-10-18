@@ -11,6 +11,9 @@ import ResponsiveNavigation from "@/components/navigation/ResponsiveNavigation";
 import ResponsiveHeader from "@/components/navigation/ResponsiveHeader";
 import { DeviceUtils } from "@/utils/DeviceUtils";
 
+// 频道标题显示时长（毫秒）
+const CHANNEL_TITLE_DISPLAY_MS = 3000;
+
 export default function LiveScreen() {
   const { m3uUrl } = useSettingsStore();
   
@@ -29,6 +32,16 @@ export default function LiveScreen() {
   const [isChannelListVisible, setIsChannelListVisible] = useState(false);
   const [channelTitle, setChannelTitle] = useState<string | null>(null);
   const titleTimer = useRef<NodeJS.Timeout | null>(null);
+
+  // 组件卸载时清理标题定时器，防止 setState 到已卸载组件
+  useEffect(() => {
+    return () => {
+      if (titleTimer.current) {
+        clearTimeout(titleTimer.current);
+        titleTimer.current = null;
+      }
+    };
+  }, []);
 
   const selectedChannelUrl = channels.length > 0 ? getPlayableUrl(channels[currentChannelIndex].url) : null;
 
@@ -64,7 +77,7 @@ export default function LiveScreen() {
   const showChannelTitle = (title: string) => {
     setChannelTitle(title);
     if (titleTimer.current) clearTimeout(titleTimer.current);
-    titleTimer.current = setTimeout(() => setChannelTitle(null), 3000);
+    titleTimer.current = setTimeout(() => setChannelTitle(null), CHANNEL_TITLE_DISPLAY_MS);
   };
 
   const handleSelectChannel = (channel: Channel) => {

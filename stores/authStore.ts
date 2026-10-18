@@ -8,6 +8,10 @@ import Logger from "@/utils/Logger";
 
 const logger = Logger.withTag('AuthStore');
 
+// 冷启动网络就绪重试：最大尝试次数与重试间隔（毫秒）
+const SERVER_CONFIG_MAX_ATTEMPTS = 3;
+const SERVER_CONFIG_RETRY_DELAY_MS = 1000;
+
 interface AuthState {
   isLoggedIn: boolean;
   isLoginModalVisible: boolean;
@@ -37,11 +41,11 @@ const useAuthStore = create<AuthState>((set, get) => ({
       // 因此最多重试几次（每次间隔短暂等待），拿到 StorageType 才继续；全部失败才提示。
       // 直接 await 真实请求（不用固定超时轮询），既处理"慢"也处理"第一次失败"。
       let serverConfig = useSettingsStore.getState().serverConfig;
-      const maxAttempts = 3;
+      const maxAttempts = SERVER_CONFIG_MAX_ATTEMPTS;
       for (let attempt = 0; attempt < maxAttempts && !serverConfig?.StorageType; attempt++) {
         if (attempt > 0) {
           // 重试前短暂等待，给冷启动的网络/服务器一点时间就绪
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+          await new Promise((resolve) => setTimeout(resolve, SERVER_CONFIG_RETRY_DELAY_MS));
         }
         if (useSettingsStore.getState().isLoadingServerConfig) {
           // 已在加载：直接 await 正在进行的请求 Promise，等它真正完成
