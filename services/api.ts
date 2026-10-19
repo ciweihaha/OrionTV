@@ -107,6 +107,15 @@ export class API {
    * 然后 JSON.parse。做法与 services/m3u.ts 的 readTextWithLimit 一致。
    */
   private async readJsonLimited(response: Response): Promise<any> {
+    // Early reject via Content-Length when the server provides one. The
+    // no-reader fallback (response.text()) cannot stream, so its size is
+    // only enforced after the body is read; this header check closes the
+    // common case before any bytes are buffered. A missing or lying
+    // Content-Length still falls through to the post-read length check.
+    const declared = Number(response.headers?.get?.("content-length"));
+    if (Number.isFinite(declared) && declared > API.MAX_JSON_BYTES) {
+      throw new Error(`RESPONSE_TOO_LARGE: body exceeded ${API.MAX_JSON_BYTES} bytes`);
+    }
     const reader = response.body?.getReader();
     let text: string;
     if (!reader) {
