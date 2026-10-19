@@ -84,6 +84,9 @@ export class API {
   // 默认请求超时（毫秒）
   private static readonly DEFAULT_TIMEOUT = 15000;
 
+  // API JSON 响应最大体积：接口返回均为小对象/列表，2MB 已足够（做法参照 services/m3u.ts 的体积限制）
+  private static readonly MAX_JSON_BYTES = 2 * 1024 * 1024;
+
   constructor(baseURL?: string) {
     if (baseURL) {
       this.baseURL = baseURL;
@@ -98,19 +101,62 @@ export class API {
     this.sessionRestorer = restorer;
   }
 
+
+  /**
+   * 带体积上限的 JSON 读取：流式累加响应体，超限抛错（防超大响应占满内存），
+   * 然后 JSON.parse。做法与 services/m3u.ts 的 readTextWithLimit 一致。
+   */
+  private async readJsonLimited(response: Response): Promise<any> {
+    const reader = response.body?.getReader();
+    let text: string;
+    if (!reader) {
+      text = await response.text();
+    } else {
+      const decoder = new TextDecoder();
+      let totalBytes = 0;
+      const chunks: string[] = [];
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          totalBytes += value.byteLength;
+          if (totalBytes > API.MAX_JSON_BYTES) {
+            await reader.cancel();
+            throw new Error(`RESPONSE_TOO_LARGE: body exceeded ${API.MAX_JSON_BYTES} bytes`);
+          }
+          chunks.push(decoder.decode(value, { stream: true }));
+        }
+        chunks.push(decoder.decode());
+        text = chunks.join("");
+      } finally {
+        reader.releaseLock();
+      }
+    }
+    if (text.length > API.MAX_JSON_BYTES) {
+      throw new Error(`RESPONSE_TOO_LARGE: body exceeded ${API.MAX_JSON_BYTES} bytes`);
+    }
+    return JSON.parse(text);
+  }
+
   private async _fetch(url: string, options: RequestInit = {}, timeoutMs: number = API.DEFAULT_TIMEOUT): Promise<Response> {
     if (!this.baseURL) {
       throw new Error("API_URL_NOT_SET");
     }
 
-    // 超时控制：调用方传入的 signal 优先，否则创建带超时的 controller
-    let signal = options.signal;
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    if (!signal) {
-      const controller = new AbortController();
-      timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-      signal = controller.signal;
+    // 超时控制：始终创建带 15 秒上限的 controller；调用方传入的 signal 也会被监听，
+    // 任一方先中止都会中止请求（组合两个 signal）。
+    const timeoutController = new AbortController();
+    const timeoutId = setTimeout(() => timeoutController.abort(), timeoutMs);
+    const callerSignal = options.signal;
+    const onCallerAbort = () => timeoutController.abort();
+    if (callerSignal) {
+      if (callerSignal.aborted) {
+        timeoutController.abort();
+      } else {
+        callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+      }
     }
+    const signal = timeoutController.signal;
 
     try {
       // 框架默认会携带 cookie，无需手动设置
@@ -164,8 +210,9 @@ export class API {
       }
       throw error;
     } finally {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
+      clearTimeout(timeoutId);
+      if (callerSignal) {
+        callerSignal.removeEventListener("abort", onCallerAbort);
       }
     }
   }
@@ -181,7 +228,7 @@ export class API {
     // headers.get() 读取（永远返回 null）。但原生网络层（OkHttp/NSURLSession）
     // 会自动管理 cookie jar，后续请求会自动携带 cookie。
     // 这里只存一个登录标记位，供 authStore.checkLoginStatus 判断用。
-    const result = await response.json();
+    const result = await this.readJsonLimited(response);
     if (result && result.ok) {
       await AsyncStorage.setItem("authCookies", "1");
     }
@@ -194,18 +241,18 @@ export class API {
       method: "POST",
     });
     await AsyncStorage.setItem("authCookies", '');
-    return response.json();
+    return this.readJsonLimited(response);
   }
 
   async getServerConfig(): Promise<ServerConfig> {
     const response = await this._fetch("/api/server-config");
-    return response.json();
+    return this.readJsonLimited(response);
   }
 
   async getFavorites(key?: string): Promise<Record<string, Favorite> | Favorite | null> {
     const url = key ? `/api/favorites?key=${encodeURIComponent(key)}` : "/api/favorites";
     const response = await this._fetch(url);
-    return response.json();
+    return this.readJsonLimited(response);
   }
 
   async addFavorite(key: string, favorite: Omit<Favorite, "save_time">): Promise<{ success: boolean }> {
@@ -214,18 +261,18 @@ export class API {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key, favorite }),
     });
-    return response.json();
+    return this.readJsonLimited(response);
   }
 
   async deleteFavorite(key?: string): Promise<{ success: boolean }> {
     const url = key ? `/api/favorites?key=${encodeURIComponent(key)}` : "/api/favorites";
     const response = await this._fetch(url, { method: "DELETE" });
-    return response.json();
+    return this.readJsonLimited(response);
   }
 
   async getPlayRecords(): Promise<Record<string, PlayRecord>> {
     const response = await this._fetch("/api/playrecords");
-    return response.json();
+    return this.readJsonLimited(response);
   }
 
   async savePlayRecord(key: string, record: Omit<PlayRecord, "save_time">): Promise<{ success: boolean }> {
@@ -234,18 +281,18 @@ export class API {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key, record }),
     });
-    return response.json();
+    return this.readJsonLimited(response);
   }
 
   async deletePlayRecord(key?: string): Promise<{ success: boolean }> {
     const url = key ? `/api/playrecords?key=${encodeURIComponent(key)}` : "/api/playrecords";
     const response = await this._fetch(url, { method: "DELETE" });
-    return response.json();
+    return this.readJsonLimited(response);
   }
 
   async getSearchHistory(): Promise<string[]> {
     const response = await this._fetch("/api/searchhistory");
-    return response.json();
+    return this.readJsonLimited(response);
   }
 
   async addSearchHistory(keyword: string): Promise<string[]> {
@@ -254,13 +301,13 @@ export class API {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ keyword }),
     });
-    return response.json();
+    return this.readJsonLimited(response);
   }
 
   async deleteSearchHistory(keyword?: string): Promise<{ success: boolean }> {
     const url = keyword ? `/api/searchhistory?keyword=${keyword}` : "/api/searchhistory";
     const response = await this._fetch(url, { method: "DELETE" });
-    return response.json();
+    return this.readJsonLimited(response);
   }
 
   getImageProxyUrl(imageUrl: string): string {
@@ -278,19 +325,19 @@ export class API {
   ): Promise<DoubanResponse> {
     const url = `/api/douban?type=${type}&tag=${encodeURIComponent(tag)}&pageSize=${pageSize}&pageStart=${pageStart}`;
     const response = await this._fetch(url);
-    return response.json();
+    return this.readJsonLimited(response);
   }
 
   async searchVideos(query: string): Promise<{ results: SearchResult[] }> {
     const url = `/api/search?q=${encodeURIComponent(query)}`;
     const response = await this._fetch(url);
-    return response.json();
+    return this.readJsonLimited(response);
   }
 
   async searchVideo(query: string, resourceId: string, signal?: AbortSignal): Promise<{ results: SearchResult[] }> {
     const url = `/api/search/one?q=${encodeURIComponent(query)}&resourceId=${encodeURIComponent(resourceId)}`;
     const response = await this._fetch(url, { signal });
-    const { results } = await response.json();
+    const { results } = await this.readJsonLimited(response);
     // 模糊匹配：归一化后比较（去空格、转小写），避免标题多一个符号就丢结果
     const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, "");
     const normalizedQuery = normalize(query);
@@ -304,13 +351,13 @@ export class API {
   async getResources(signal?: AbortSignal): Promise<ApiSite[]> {
     const url = `/api/search/resources`;
     const response = await this._fetch(url, { signal });
-    return response.json();
+    return this.readJsonLimited(response);
   }
 
   async getVideoDetail(source: string, id: string): Promise<VideoDetail> {
     const url = `/api/detail?source=${source}&id=${id}`;
     const response = await this._fetch(url);
-    return response.json();
+    return this.readJsonLimited(response);
   }
 }
 
