@@ -236,6 +236,12 @@ class UpdateService {
    * - 获取不到期望值：记录警告并放行（兼容未附带 sha256 的旧版本），
    *   建议发布流程始终附带 .sha256 文件
    */
+  /**
+   * 校验下载的 APK 的 SHA256。
+   * 期望值从 `${downloadUrl}.sha256` 获取（GitHub Release 附件）。
+   * - 期望值拉取失败 / 格式无效 / 与实际哈希不一致：全部抛错并由调用方删除文件（fail-closed），
+   *   绝不降级安装。发布流程必须在 GitHub Release 中附带 .sha256 文件。
+   */
   private async verifyApkSha256(fileUri: string, downloadUrl: string): Promise<void> {
     let expected = "";
     try {
@@ -243,24 +249,30 @@ class UpdateService {
       const timeoutId = setTimeout(() => controller.abort(), SHA256_FETCH_TIMEOUT_MS);
       const resp = await fetch(`${downloadUrl}.sha256`, { signal: controller.signal });
       clearTimeout(timeoutId);
-      if (resp.ok) {
-        const text = (await resp.text()).trim();
-        // 兼容 "hash  filename" 和纯 hash 两种格式
-        expected = text.split(/\s+/)[0].toLowerCase();
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
       }
+      const text = (await resp.text()).trim();
+      // 兼容 "hash  filename" 和纯 hash 两种格式
+      expected = text.split(/\s+/)[0].toLowerCase();
     } catch (e) {
-      logger.warn('Failed to fetch .sha256, skipping strict verification', e);
+      logger.error('Failed to fetch .sha256, aborting update (fail-closed)', e);
+      Toast.show({
+        type: 'error',
+        text1: '安全校验失败',
+        text2: '无法获取该版本的 SHA256 校验文件，已中止更新',
+      });
+      throw new Error('SHA256: cannot obtain expected hash for APK, update aborted');
     }
 
     if (!expected || !/^[0-9a-f]{64}$/.test(expected)) {
-      logger.warn('No valid SHA256 provided for APK, installing without verification. ' +
-        '建议在 GitHub Release 中附带 .sha256 文件。');
+      logger.error('Invalid SHA256 in .sha256 file, aborting update (fail-closed)', expected);
       Toast.show({
-        type: 'info',
-        text1: '安全提示',
-        text2: '该版本未提供 SHA256 校验文件，请确认来源可信',
+        type: 'error',
+        text1: '安全校验失败',
+        text2: 'SHA256 校验文件内容无效，已中止更新',
       });
-      return;
+      throw new Error('SHA256: invalid expected hash format, update aborted');
     }
 
     // 分块读取文件并计算 SHA256（避免一次性加载大文件进内存）
