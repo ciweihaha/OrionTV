@@ -5,13 +5,13 @@ export const UPDATE_CONFIG = {
   // 检查更新间隔（毫秒）
   CHECK_INTERVAL: 12 * 60 * 60 * 1000, // 12小时
 
-  // GitHub相关URL
+  // GitHub相关URL（直连官方域名，不再经任何第三方镜像中转）
   GITHUB_RAW_URL:
-    `https://ghfast.top/https://raw.githubusercontent.com/ciweihaha/OrionTV/refs/heads/master/package.json?t=${Date.now()}`,
+    `https://raw.githubusercontent.com/ciweihaha/OrionTV/refs/heads/master/package.json?t=${Date.now()}`,
 
   // 获取平台特定的下载URL
   getDownloadUrl(version: string): string {
-    return `https://ghfast.top/https://github.com/ciweihaha/OrionTV/releases/download/v${version}/orionTV.${version}.apk`;
+    return `https://github.com/ciweihaha/OrionTV/releases/download/v${version}/orionTV.${version}.apk`;
   },
 
   // 是否显示更新日志
