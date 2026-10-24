@@ -52,19 +52,23 @@ class UpdateService {
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), VERSION_CHECK_TIMEOUT_MS);
-        const response = await fetch(UPDATE_CONFIG.GITHUB_RAW_URL, {
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
+        try {
+          const response = await fetch(UPDATE_CONFIG.GITHUB_RAW_URL, {
+            signal: controller.signal,
+          });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          // 超时须覆盖到响应体读完，且计时器在所有路径（含 fetch 抛错）都清理
+          const remotePackage = await response.json();
+          const remoteVersion = remotePackage.version as string;
+          return {
+            version: remoteVersion,
+            downloadUrl: UPDATE_CONFIG.getDownloadUrl(remoteVersion),
+          };
+        } finally {
+          clearTimeout(timeoutId);
         }
-        const remotePackage = await response.json();
-        const remoteVersion = remotePackage.version as string;
-        return {
-          version: remoteVersion,
-          downloadUrl: UPDATE_CONFIG.getDownloadUrl(remoteVersion),
-        };
       } catch (e) {
         logger.warn(`checkVersion attempt ${attempt}/${UPDATE_MAX_RETRIES}`, e);
         if (attempt === UPDATE_MAX_RETRIES) {
@@ -188,6 +192,14 @@ class UpdateService {
           throw new Error('Download failed: No URI available');
         }
 
+        // 下载后硬校验实际体积：HEAD 预检可被绕过、进度回调也非必达，
+        // 落盘大小超限一律删文件并中止（走 catch 的 APK_TOO_LARGE 不重试分支），
+        // 不进入后续 SHA 校验与安装
+        const downloadedInfo = await FileSystem.getInfoAsync(result.uri);
+        if (downloadedInfo.exists && downloadedInfo.size !== undefined && downloadedInfo.size > MAX_APK_DOWNLOAD_BYTES) {
+          throw new Error(`APK_TOO_LARGE: downloaded ${downloadedInfo.size} bytes`);
+        }
+
         // SHA256 完整性校验（P0-3：防 CDN 投毒）
         await this.verifyApkSha256(result.uri, url);
 
@@ -232,13 +244,6 @@ class UpdateService {
   /**
    * 校验下载的 APK 的 SHA256。
    * 期望值从 `${downloadUrl}.sha256` 获取（GitHub Release 附件）。
-   * - 能获取到期望值：必须完全一致，否则抛错并删除文件
-   * - 获取不到期望值：记录警告并放行（兼容未附带 sha256 的旧版本），
-   *   建议发布流程始终附带 .sha256 文件
-   */
-  /**
-   * 校验下载的 APK 的 SHA256。
-   * 期望值从 `${downloadUrl}.sha256` 获取（GitHub Release 附件）。
    * - 期望值拉取失败 / 格式无效 / 与实际哈希不一致：全部抛错并由调用方删除文件（fail-closed），
    *   绝不降级安装。发布流程必须在 GitHub Release 中附带 .sha256 文件。
    */
@@ -247,12 +252,17 @@ class UpdateService {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), SHA256_FETCH_TIMEOUT_MS);
-      const resp = await fetch(`${downloadUrl}.sha256`, { signal: controller.signal });
-      clearTimeout(timeoutId);
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}`);
+      let text = "";
+      try {
+        const resp = await fetch(`${downloadUrl}.sha256`, { signal: controller.signal });
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+        // 超时须覆盖到响应体读完，且计时器在所有路径（含 fetch 抛错）都清理
+        text = (await resp.text()).trim();
+      } finally {
+        clearTimeout(timeoutId);
       }
-      const text = (await resp.text()).trim();
       // 兼容 "hash  filename" 和纯 hash 两种格式
       expected = text.split(/\s+/)[0].toLowerCase();
     } catch (e) {
@@ -350,10 +360,11 @@ class UpdateService {
         position: offset,
         length: len,
       });
-      const binaryLen = Math.floor((base64.length * 3) / 4);
-      const chunk = new Uint8Array(binaryLen);
+      // 解码长度必须取 atob 的实际输出长度：按 base64.length*3/4 估算会把
+      // 填充（= / ==）也算进字节数，每块多喂至多 2 个零字节，哈希必然错误
       const binStr = atob(base64);
-      for (let i = 0; i < binaryLen; i++) {
+      const chunk = new Uint8Array(binStr.length);
+      for (let i = 0; i < binStr.length; i++) {
         chunk[i] = binStr.charCodeAt(i);
       }
       // 拼接 leftover + chunk，按 64 字节块处理
@@ -368,26 +379,28 @@ class UpdateService {
       processedBytes += chunk.length;
     }
 
-    // SHA256 填充：0x80 + 0* + 64-bit 长度
-    const bitLen = fileSize * 8;
-    const padding = new Uint8Array(leftover.length + 1 + 8);
-    padding.set(leftover);
-    padding[leftover.length] = 0x80;
-    // 长度写入最后 8 字节（大端）
-    const dv = new DataView(padding.buffer);
-    dv.setUint32(padding.length - 4, bitLen >>> 0, false);
-    dv.setUint32(padding.length - 8, Math.floor(bitLen / 0x100000000), false);
-    // 如果 leftover+9 > 64，需要补一个块
-    let padOffset = 0;
-    if (leftover.length + 9 > 64) {
-      const first = new Uint8Array(64);
-      first.set(padding.subarray(0, 64));
-      processBlock(first);
-      padOffset = 64;
+    // 字节数完整性第二道闸：实际送入哈希的字节数必须与文件大小严格一致，
+    // 否则说明分块读取/解码出了偏差，哈希不可信，直接抛错
+    if (processedBytes !== fileSize) {
+      throw new Error(`SHA256: processed ${processedBytes} bytes, expected ${fileSize}`);
     }
-    const last = new Uint8Array(64);
-    last.set(padding.subarray(padOffset));
-    processBlock(last);
+
+    // SHA256 填充（按规范构造）：leftover 后补 0x80、再补零，使总长 ≡ 56 (mod 64)，
+    // 最后 8 字节写入 64 位大端比特长度；leftover ≥ 56 时自然落成两块。
+    // 长度字段必须位于最终块的最后 8 字节，写错位置只有长度为 0 时碰巧无差异。
+    const bitLen = fileSize * 8;
+    const afterMarker = leftover.length + 1; // 含 0x80
+    const zeroPad = (56 - (afterMarker % 64) + 64) % 64;
+    const tailLen = afterMarker + zeroPad + 8;
+    const tail = new Uint8Array(tailLen);
+    tail.set(leftover);
+    tail[leftover.length] = 0x80;
+    const dv = new DataView(tail.buffer);
+    dv.setUint32(tailLen - 4, bitLen >>> 0, false);
+    dv.setUint32(tailLen - 8, Math.floor(bitLen / 0x100000000), false);
+    for (let b = 0; b < tailLen / 64; b++) {
+      processBlock(tail.subarray(b * 64, b * 64 + 64));
+    }
 
     return [h0, h1, h2, h3, h4, h5, h6, h7]
       .map(v => v.toString(16).padStart(8, '0'))
