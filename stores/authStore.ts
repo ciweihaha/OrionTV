@@ -123,14 +123,21 @@ const useAuthStore = create<AuthState>((set, get) => ({
     return restorePromise;
   },
   logout: async () => {
+    // 本地退出必须与远程登出解耦：远程请求失败（离线/超时）只记日志，
+    // 绝不能阻断本地凭据清除与状态更新——否则用户在断网时退不出去，
+    // 且残留的凭据会被 restoreSession 拿去自动重登，等于没有退出。
     try {
       await api.logout();
+    } catch (error) {
+      logger.error("Remote logout failed, proceeding with local logout:", error);
+    }
+    try {
       // 清除 SecureStore 中的登录凭据，防止"退出"后仍自动登录
       await LoginCredentialsManager.clear();
-      set({ isLoggedIn: false, isLoginModalVisible: true });
     } catch (error) {
-      logger.error("Failed to logout:", error);
+      logger.error("Failed to clear saved credentials during logout:", error);
     }
+    set({ isLoggedIn: false, isLoginModalVisible: true });
   },
 }));
 
