@@ -152,24 +152,45 @@ export class API {
       throw new Error("API_URL_NOT_SET");
     }
 
-    // 超时控制：始终创建带 15 秒上限的 controller；调用方传入的 signal 也会被监听，
-    // 任一方先中止都会中止请求（组合两个 signal）。
-    const timeoutController = new AbortController();
-    const timeoutId = setTimeout(() => timeoutController.abort(), timeoutMs);
+    // 调用方 signal 单独持有、独立判断：它只代表"调用方主动取消"，与超时严格区分。
+    // 401 等待会话恢复后、发起重试前、以及重试进行中，只要调用方已取消，
+    // 一律不再发出（或立即中止）请求；只有超时导致的中止才允许换新信号重试。
     const callerSignal = options.signal;
-    const onCallerAbort = () => timeoutController.abort();
-    if (callerSignal) {
-      if (callerSignal.aborted) {
-        timeoutController.abort();
-      } else {
-        callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+    const callerAborted = () => !!callerSignal?.aborted;
+
+    // 创建一个组合 controller：超时或调用方取消任一发生都会中止它。
+    // 返回的 cleanup 须在退出时调用，负责清定时器与调用方监听，避免泄漏。
+    const createLinkedController = () => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      const onCallerAbort = () => controller.abort();
+      if (callerSignal) {
+        if (callerSignal.aborted) {
+          controller.abort();
+        } else {
+          callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+        }
       }
-    }
-    const signal = timeoutController.signal;
+      const cleanup = () => {
+        clearTimeout(timeoutId);
+        if (callerSignal) {
+          callerSignal.removeEventListener("abort", onCallerAbort);
+        }
+      };
+      return { signal: controller.signal, cleanup };
+    };
+
+    const abortError = () => {
+      const err = new Error("The user aborted a request.");
+      err.name = "AbortError";
+      return err;
+    };
+
+    const first = createLinkedController();
 
     try {
       // 框架默认会携带 cookie，无需手动设置
-      const response = await fetch(`${this.baseURL}${url}`, { ...options, signal });
+      const response = await fetch(`${this.baseURL}${url}`, { ...options, signal: first.signal });
 
       if (response.status === 401) {
         // 会话过期：自动重登后重试一次（登录接口本身除外，避免循环）
@@ -180,13 +201,18 @@ export class API {
         if (this.sessionRestorer && !url.startsWith("/api/login") && isIdempotent) {
           const restored = await this.sessionRestorer();
           if (restored) {
-            // 重试时若原 signal 已中止（如超时），用新的超时 signal，避免重试直接失败
-            let retrySignal = signal;
-            let retryTimeoutId: ReturnType<typeof setTimeout> | undefined;
-            if (signal.aborted) {
-              const retryController = new AbortController();
-              retryTimeoutId = setTimeout(() => retryController.abort(), timeoutMs);
-              retrySignal = retryController.signal;
+            // 会话恢复等待期间调用方可能已取消：被取消的请求绝不重试
+            if (callerAborted()) {
+              throw abortError();
+            }
+            // 首次 signal 已中止且并非调用方取消，只能是超时：换一个新的组合
+            // signal 重试（同样受超时与调用方取消联动），避免重试直接失败
+            let retrySignal = first.signal;
+            let retryCleanup: (() => void) | null = null;
+            if (first.signal.aborted) {
+              const retry = createLinkedController();
+              retrySignal = retry.signal;
+              retryCleanup = retry.cleanup;
             }
             try {
               const retryResponse = await fetch(`${this.baseURL}${url}`, { ...options, signal: retrySignal });
@@ -198,8 +224,8 @@ export class API {
               }
               return retryResponse;
             } finally {
-              if (retryTimeoutId) {
-                clearTimeout(retryTimeoutId);
+              if (retryCleanup) {
+                retryCleanup();
               }
             }
           }
@@ -213,16 +239,13 @@ export class API {
 
       return response;
     } catch (error) {
-      // 超时错误转为更友好的错误信息
+      // 中止错误（超时或调用方取消）转为更友好的错误信息
       if (error instanceof Error && error.name === "AbortError") {
         throw new Error(`REQUEST_TIMEOUT: ${url}`);
       }
       throw error;
     } finally {
-      clearTimeout(timeoutId);
-      if (callerSignal) {
-        callerSignal.removeEventListener("abort", onCallerAbort);
-      }
+      first.cleanup();
     }
   }
 
@@ -314,7 +337,7 @@ export class API {
   }
 
   async deleteSearchHistory(keyword?: string): Promise<{ success: boolean }> {
-    const url = keyword ? `/api/searchhistory?keyword=${keyword}` : "/api/searchhistory";
+    const url = keyword ? `/api/searchhistory?keyword=${encodeURIComponent(keyword)}` : "/api/searchhistory";
     const response = await this._fetch(url, { method: "DELETE" });
     return this.readJsonLimited(response);
   }
@@ -364,7 +387,7 @@ export class API {
   }
 
   async getVideoDetail(source: string, id: string): Promise<VideoDetail> {
-    const url = `/api/detail?source=${source}&id=${id}`;
+    const url = `/api/detail?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}`;
     const response = await this._fetch(url);
     return this.readJsonLimited(response);
   }
