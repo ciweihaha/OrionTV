@@ -103,24 +103,60 @@ export class API {
 
 
   /**
+   * UTF-8 字节长度：不依赖 TextEncoder（各运行环境可用性不一），按码点逐个
+   * 累加，与 TextEncoder 编码长度一致（孤立代理按 U+FFFD 计 3 字节）。
+   */
+  private static utf8ByteLength(text: string): number {
+    let bytes = 0;
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (code <= 0x7f) {
+        bytes += 1;
+      } else if (code <= 0x7ff) {
+        bytes += 2;
+      } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+        const next = text.charCodeAt(i + 1);
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          bytes += 4;
+          i++;
+        } else {
+          bytes += 3;
+        }
+      } else {
+        bytes += 3;
+      }
+    }
+    return bytes;
+  }
+
+  /**
    * 带体积上限的 JSON 读取：流式累加响应体，超限抛错（防超大响应占满内存），
    * 然后 JSON.parse。做法与 services/m3u.ts 的 readTextWithLimit 一致。
+   * 体积一律按 UTF-8 字节算（text.length 是 UTF-16 码元数，对多字节文本
+   * 会低估，中文约 3 倍）；体读取另设独立超时（默认 15s，与 _fetch 默认
+   * 超时一致），因为 _fetch 的定时器在拿到响应头后即清掉，体读取阶段
+   * 原本无超时保护。RN 真机上响应通常没有 body.getReader，无流分支
+   * 是主路径：该分支的 text() 无法中途取消，超时时调用方立即拿到
+   * 超时错误（底层 text() 继续跑完，不再无限挂起调用方）。
    */
-  private async readJsonLimited(response: Response): Promise<any> {
+  private async readJsonLimited(response: Response, bodyTimeoutMs: number = API.DEFAULT_TIMEOUT): Promise<any> {
     // Early reject via Content-Length when the server provides one. The
     // no-reader fallback (response.text()) cannot stream, so its size is
     // only enforced after the body is read; this header check closes the
     // common case before any bytes are buffered. A missing or lying
-    // Content-Length still falls through to the post-read length check.
+    // Content-Length still falls through to the post-read byte-length check.
+    // Note: this early reject only helps against honest servers.
     const declared = Number(response.headers?.get?.("content-length"));
     if (Number.isFinite(declared) && declared > API.MAX_JSON_BYTES) {
       throw new Error(`RESPONSE_TOO_LARGE: body exceeded ${API.MAX_JSON_BYTES} bytes`);
     }
-    const reader = response.body?.getReader();
-    let text: string;
-    if (!reader) {
-      text = await response.text();
-    } else {
+    let activeReader: { cancel: () => Promise<void> } | null = null;
+    const readBody = async (): Promise<string> => {
+      const reader = response.body?.getReader();
+      if (!reader) {
+        return response.text();
+      }
+      activeReader = reader;
       const decoder = new TextDecoder();
       let totalBytes = 0;
       const chunks: string[] = [];
@@ -136,12 +172,38 @@ export class API {
           chunks.push(decoder.decode(value, { stream: true }));
         }
         chunks.push(decoder.decode());
-        text = chunks.join("");
+        return chunks.join("");
       } finally {
         reader.releaseLock();
       }
+    };
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let text: string;
+    try {
+      text = await Promise.race([
+        readBody(),
+        new Promise<string>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            if (activeReader) {
+              try {
+                const p = activeReader.cancel();
+                if (p && typeof (p as unknown as { catch?: unknown }).catch === "function") {
+                  (p as unknown as { catch: (fn: () => void) => void }).catch(() => {});
+                }
+              } catch {
+                // reader 已释放等，忽略
+              }
+            }
+            const err = new Error(`RESPONSE_TIMEOUT: body read exceeded ${bodyTimeoutMs}ms`);
+            err.name = "TimeoutError";
+            reject(err);
+          }, bodyTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
     }
-    if (text.length > API.MAX_JSON_BYTES) {
+    if (API.utf8ByteLength(text) > API.MAX_JSON_BYTES) {
       throw new Error(`RESPONSE_TOO_LARGE: body exceeded ${API.MAX_JSON_BYTES} bytes`);
     }
     return JSON.parse(text);
