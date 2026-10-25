@@ -217,7 +217,7 @@ export class API {
       }
     };
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    let removeAbortListener: (() => void) | null;
+    let removeAbortListener: (() => void) | undefined;
     let text: string;
     try {
       text = await Promise.race([
