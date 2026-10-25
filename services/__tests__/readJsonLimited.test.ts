@@ -83,9 +83,9 @@ describe("API.readJsonLimited 体积与超时保护", () => {
     expect((resp as any).text).not.toHaveBeenCalled();
   });
 
-  it("④ 多字节超限按字节拦：码元未超限，字节超限（150 万中文 ≈ 450 万字节）", async () => {
+  it("④ 多字节超限按字节拦：码元未超限、字节超限（150 万中文 ≈ 450 万字节）", async () => {
     const body = JSON.stringify({ v: "中".repeat(1500000) });
-    expect(body.length).toBeLessThan(LIMIT); // 旧的 text.length 检验会放行
+    expect(body.length).toBeLessThan(LIMIT); // 旧码的 text.length 检查会放行
     await expect((api as any).readJsonLimited(noReaderResponse(body))).rejects.toThrow(
       /^RESPONSE_TOO_LARGE/,
     );
@@ -102,7 +102,7 @@ describe("API.readJsonLimited 体积与超时保护", () => {
     expect(result).toEqual({ ok: true });
   });
 
-  it("⑦ 流式分支正常体通过，超大体触发 cancel 被调", async () => {
+  it("⑦ 流式分支正常体通过，超大体被拦且 cancel 被调", async () => {
     const asciiBytes = (s: string) => new Uint8Array([...s].map((c) => c.charCodeAt(0)));
     const ok = readerResponse([asciiBytes(JSON.stringify({ ok: true }))]);
     await expect((api as any).readJsonLimited(ok.response)).resolves.toEqual({ ok: true });
@@ -150,7 +150,7 @@ describe("API.readJsonLimited 体积与超时保护", () => {
 
   it("⑪ OTV-2 无流分支取消不中断读取：abort 后仍以 RESPONSE_TIMEOUT 在体超时内结算（文档化限制）", async () => {
     // 平台限制：无流分支（RN 真机主路径）无法取消 response.text()，
-    // abort 后读取仍继续，直到 text() 结算或体超时；本用例断言它以体超时结算。
+    // abort 后读取仍继续，直到 text() 结算或体超时；本例断言它以体超时结算。
     const resp = {
       headers: { get: () => null },
       body: undefined,
@@ -197,7 +197,7 @@ describe("API.readJsonLimited 体积与超时保护", () => {
     expect(Date.now() - start).toBeLessThan(500);
   });
 
-  it("⑭ OTV-1 成功清零：2 次超时 → 1 次成功 → 再 2 次超时后，下一次仍走体超时而非立即熔断", async () => {
+  it("⑭ OTV-1 成功清零：2 次超时 → 1 次成功 → 再 2 次超时后，下一次仍走超时而非立即熔断", async () => {
     const key = "test-breaker-reset";
     const asciiBytes = (s: string) => new Uint8Array([...s].map((c) => c.charCodeAt(0)));
     for (let i = 0; i < 2; i++) {
