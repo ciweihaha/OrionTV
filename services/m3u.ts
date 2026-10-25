@@ -1,4 +1,5 @@
 import Logger from '@/utils/Logger';
+import { utf8ByteLength } from '../utils/utf8ByteLength';
 
 const logger = Logger.withTag('M3U');
 
@@ -92,12 +93,23 @@ export const getPlayableUrl = (originalUrl: string | null): string | null => {
 
 /**
  * 流式读取响应体文本，超限返回 null（R13）
+ * OTV-3：与 api.ts 的 readJsonLimited 同步——无流分支不再用 text.length
+ * （UTF-16 码元数）判断，改用共享工具 utf8ByteLength 按 UTF-8 字节判断；
+ * 并移植 Content-Length 预检，诚实偏大的声明在读体前即返回 null。
+ * 超限后返回空列表（fail-closed，见 fetchAndParseM3u）保持不变。
+ * 注意：个别超大中文列表会由“放行”变“拒绝并返回空列表”，属预期收紧。
  */
 const readTextWithLimit = async (response: Response, maxBytes: number): Promise<string | null> => {
+  // Content-Length 预检：与 api.ts 的 early reject 一致，缺失或谎报的声明
+  // 仍由后续字节校验兜底。
+  const declared = Number(response.headers?.get?.('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    return null;
+  }
   const reader = response.body?.getReader();
   if (!reader) {
     const text = await response.text();
-    return text.length <= maxBytes ? text : null;
+    return utf8ByteLength(text) <= maxBytes ? text : null;
   }
   const decoder = new TextDecoder();
   let totalBytes = 0;

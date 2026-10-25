@@ -71,7 +71,7 @@ describe("API._fetch 取消与 401 重试语义", () => {
     await waitFor(() => fetchMock.mock.calls.length === 1);
 
     caller.abort();
-    await expect(promise).rejects.toThrow(/^REQUEST_TIMEOUT/);
+    await expect(promise).rejects.toThrow("The user aborted a request.");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(restorer).not.toHaveBeenCalled();
   });
@@ -95,7 +95,7 @@ describe("API._fetch 取消与 401 重试语义", () => {
     caller.abort();
     resolveRestorer!(true);
 
-    await expect(promise).rejects.toThrow(/^REQUEST_TIMEOUT/);
+    await expect(promise).rejects.toThrow("The user aborted a request.");
     // 关键断言：取消后绝无第二次 fetch 发出
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -109,7 +109,7 @@ describe("API._fetch 取消与 401 重试语义", () => {
     await waitFor(() => fetchMock.mock.calls.length === 2);
 
     caller.abort();
-    await expect(promise).rejects.toThrow(/^REQUEST_TIMEOUT/);
+    await expect(promise).rejects.toThrow("The user aborted a request.");
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const retrySignal = fetchMock.mock.calls[1][1].signal as AbortSignal;
     expect(retrySignal.aborted).toBe(true);
@@ -136,7 +136,7 @@ describe("API._fetch 取消与 401 重试语义", () => {
     expect(retrySignal.aborted).toBe(false);
 
     caller.abort();
-    await expect(promise).rejects.toThrow(/^REQUEST_TIMEOUT/);
+    await expect(promise).rejects.toThrow("The user aborted a request.");
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(retrySignal.aborted).toBe(true); // 调用方取消联动到了新信号
   });
@@ -172,6 +172,14 @@ describe("API._fetch 取消与 401 重试语义", () => {
 
     await expect((api as any)._fetch("/api/search?q=x", {}, 5000)).rejects.toThrow("UNAUTHORIZED");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("④c OTV-4 超时（无调用方取消）仍走 REQUEST_TIMEOUT", async () => {
+    // pendingUntilAbort 监听 _fetch 组合的超时信号：超时中止后 fetch 以 AbortError
+    // 拒绝，调用方未取消时 _fetch 将其转为 REQUEST_TIMEOUT，与调用方取消区分。
+    fetchMock.mockImplementation(pendingUntilAbort);
+    const promise = (api as any)._fetch("/api/search?q=x", {}, 30);
+    await expect(promise).rejects.toThrow(/^REQUEST_TIMEOUT/);
   });
 });
 

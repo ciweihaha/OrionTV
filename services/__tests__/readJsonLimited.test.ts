@@ -137,4 +137,88 @@ describe("API.readJsonLimited 体积与超时保护", () => {
     expect(Date.now() - start).toBeLessThan(5000);
     expect(cancel).toHaveBeenCalled();
   });
+
+  it("⑩ OTV-2 流式分支取消：abort 后以 AbortError 拒绝且 cancel 被调，不是 RESPONSE_TIMEOUT", async () => {
+    const { response, cancel } = hangingReaderResponse();
+    const controller = new AbortController();
+    const promise = (api as any).readJsonLimited(response, 5000, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort();
+    await expect(promise).rejects.toThrow("The user aborted a request.");
+    expect(cancel).toHaveBeenCalled();
+  });
+
+  it("⑪ OTV-2 无流分支取消不中断读取：abort 后仍以 RESPONSE_TIMEOUT 在体超时内结算（文档化限制）", async () => {
+    // 平台限制：无流分支（RN 真机主路径）无法取消 response.text()，
+    // abort 后读取仍继续，直到 text() 结算或体超时；本例断言它以体超时结算。
+    const resp = {
+      headers: { get: () => null },
+      body: undefined,
+      text: () => new Promise(() => {}),
+    } as unknown as Response;
+    const controller = new AbortController();
+    const promise = (api as any).readJsonLimited(resp, 50, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort();
+    const start = Date.now();
+    await expect(promise).rejects.toThrow(/^RESPONSE_TIMEOUT/);
+    expect(Date.now() - start).toBeLessThan(5000);
+  });
+
+  it("⑫ OTV-2 无流分支取消后仍可正常返回（文档化限制：取消不中断 text() 读取）", async () => {
+    const resp = {
+      headers: { get: () => null },
+      body: undefined,
+      text: () =>
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve(JSON.stringify({ ok: true })), 10),
+        ),
+    } as unknown as Response;
+    const controller = new AbortController();
+    const promise = (api as any).readJsonLimited(resp, 5000, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort();
+    await expect(promise).resolves.toEqual({ ok: true });
+  });
+
+  it("⑬ OTV-1 熔断：同一 breakerKey 连续 3 次体超时后，第 4 次立即以 BODY_TIMEOUT_BREAKER_OPEN 拒绝", async () => {
+    const key = "test-breaker";
+    for (let i = 0; i < 3; i++) {
+      const { response } = hangingReaderResponse();
+      await expect((api as any).readJsonLimited(response, 50, undefined, key)).rejects.toThrow(
+        /^RESPONSE_TIMEOUT/,
+      );
+    }
+    const { response } = hangingReaderResponse();
+    const start = Date.now();
+    await expect((api as any).readJsonLimited(response, 50, undefined, key)).rejects.toThrow(
+      /^BODY_TIMEOUT_BREAKER_OPEN/,
+    );
+    expect(Date.now() - start).toBeLessThan(500);
+  });
+
+  it("⑭ OTV-1 成功清零：2 次超时 → 1 次成功 → 再 2 次超时后，下一次仍走超时而非立即熔断", async () => {
+    const key = "test-breaker-reset";
+    const asciiBytes = (s: string) => new Uint8Array([...s].map((c) => c.charCodeAt(0)));
+    for (let i = 0; i < 2; i++) {
+      const { response } = hangingReaderResponse();
+      await expect((api as any).readJsonLimited(response, 50, undefined, key)).rejects.toThrow(
+        /^RESPONSE_TIMEOUT/,
+      );
+    }
+    const ok = readerResponse([asciiBytes(JSON.stringify({ ok: true }))]);
+    await expect((api as any).readJsonLimited(ok.response, 50, undefined, key)).resolves.toEqual({
+      ok: true,
+    });
+    for (let i = 0; i < 2; i++) {
+      const { response } = hangingReaderResponse();
+      await expect((api as any).readJsonLimited(response, 50, undefined, key)).rejects.toThrow(
+        /^RESPONSE_TIMEOUT/,
+      );
+    }
+    const { response } = hangingReaderResponse();
+    await expect((api as any).readJsonLimited(response, 50, undefined, key)).rejects.toThrow(
+      /^RESPONSE_TIMEOUT/,
+    );
+  });
 });
