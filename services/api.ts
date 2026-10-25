@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { utf8ByteLength } from "../utils/utf8ByteLength";
 
 // region: --- Interface Definitions ---
 export interface DoubanItem {
@@ -87,6 +88,13 @@ export class API {
   // API JSON 响应最大体积：接口返回均为小对象/列表，2MB 已足够（做法参照 services/m3u.ts 的体积限制）
   private static readonly MAX_JSON_BYTES = 2 * 1024 * 1024;
 
+  // OTV-1 体超时熔断：同一类请求（breakerKey）连续 3 次体超时后，60 秒内不再发起同类请求。
+  // 常量与窗口同时写在代码注释与 PR 描述中。熔断只统计体读取超时（RESPONSE_TIMEOUT），
+  // 不统计取消、超大体与其它错误；一次成功读取即清零连续计数。bodyTimeoutMs 本次不调小。
+  private static readonly BODY_TIMEOUT_BREAKER_THRESHOLD = 3;
+  private static readonly BODY_TIMEOUT_BREAKER_WINDOW_MS = 60_000;
+  private bodyTimeoutBreaker = new Map<string, { consecutive: number; blockedUntil: number }>();
+
   constructor(baseURL?: string) {
     if (baseURL) {
       this.baseURL = baseURL;
@@ -101,32 +109,31 @@ export class API {
     this.sessionRestorer = restorer;
   }
 
+  private isBodyTimeoutBreakerOpen(key: string): boolean {
+    const state = this.bodyTimeoutBreaker.get(key);
+    return !!state && Date.now() < state.blockedUntil;
+  }
 
-  /**
-   * UTF-8 字节长度：不依赖 TextEncoder（各运行环境可用性不一），按码点逐个
-   * 累加，与 TextEncoder 编码长度一致（孤立代理按 U+FFFD 计 3 字节）。
-   */
-  private static utf8ByteLength(text: string): number {
-    let bytes = 0;
-    for (let i = 0; i < text.length; i++) {
-      const code = text.charCodeAt(i);
-      if (code <= 0x7f) {
-        bytes += 1;
-      } else if (code <= 0x7ff) {
-        bytes += 2;
-      } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
-        const next = text.charCodeAt(i + 1);
-        if (next >= 0xdc00 && next <= 0xdfff) {
-          bytes += 4;
-          i++;
-        } else {
-          bytes += 3;
-        }
-      } else {
-        bytes += 3;
-      }
+  private recordBodyTimeout(key: string): void {
+    const now = Date.now();
+    const prev = this.bodyTimeoutBreaker.get(key);
+    let consecutive = prev?.consecutive ?? 0;
+    if (prev && prev.blockedUntil !== 0 && now >= prev.blockedUntil) {
+      consecutive = 0;
     }
-    return bytes;
+    consecutive += 1;
+    if (consecutive >= API.BODY_TIMEOUT_BREAKER_THRESHOLD) {
+      this.bodyTimeoutBreaker.set(key, {
+        consecutive: 0,
+        blockedUntil: now + API.BODY_TIMEOUT_BREAKER_WINDOW_MS,
+      });
+    } else {
+      this.bodyTimeoutBreaker.set(key, { consecutive, blockedUntil: prev?.blockedUntil ?? 0 });
+    }
+  }
+
+  private resetBodyTimeout(key: string): void {
+    this.bodyTimeoutBreaker.delete(key);
   }
 
   /**
@@ -138,8 +145,40 @@ export class API {
    * 原本无超时保护。RN 真机上响应通常没有 body.getReader，无流分支
    * 是主路径：该分支的 text() 无法中途取消，超时时调用方立即拿到
    * 超时错误（底层 text() 继续跑完，不再无限挂起调用方）。
+   *
+   * OTV-1 已知限制（退守方案，本次不做 XHR 适配）：
+   * (a) 无流分支（RN 真机主路径）超时后，调用方虽立即拿到 RESPONSE_TIMEOUT，
+   *     但底层 text() 读取并未停止，仍在后台继续缓冲；超大体先完整缓冲再判超限。
+   * (b) XHR 适配方案 deferred：没有 RN 真机可验证 XHR 适配层，擅自替换无流分支的
+   *     response.text() 有破坏搜索的风险，需真机验证后另行实施；真机复现
+   *     （Mock 服务端滴流大体＋超时＋取消三场景）标为待真机验收。
+   * (c) 本次只做退守：保留 Content-Length early reject 与 utf8ByteLength 事后字节校验
+   *     不动；不只把 bodyTimeoutMs 调小（调用方体验变差，悬空读取问题仍在）；
+   *     并在调用方加连续超时熔断：同一类请求连续 3 次体超时后，60 秒内不再发起
+   *     同类请求（见 BODY_TIMEOUT_BREAKER_THRESHOLD / BODY_TIMEOUT_BREAKER_WINDOW_MS）。
+   *
+   * OTV-2 signal：可选 signal 参数。流式分支监听 abort → reader.cancel()，取消后
+   * 抛 AbortError 语义错误，与体超时（RESPONSE_TIMEOUT）严格区分。无流分支在 RN 下
+   * 仍无法取消：调用方取消不会中断正在进行的 text()，该调用要么等 text() 结算，
+   * 要么在体超时（默认 15 秒）内以 RESPONSE_TIMEOUT 结算——这是平台限制，不是本函数的
+   * bug；已开始前就已取消的 signal 会立即抛 AbortError，不再发起读取。
    */
-  private async readJsonLimited(response: Response, bodyTimeoutMs: number = API.DEFAULT_TIMEOUT): Promise<any> {
+  private async readJsonLimited(
+    response: Response,
+    bodyTimeoutMs: number = API.DEFAULT_TIMEOUT,
+    signal?: AbortSignal,
+    breakerKey?: string,
+  ): Promise<any> {
+    if (breakerKey && this.isBodyTimeoutBreakerOpen(breakerKey)) {
+      throw new Error(
+        `BODY_TIMEOUT_BREAKER_OPEN: ${breakerKey} blocked for ${API.BODY_TIMEOUT_BREAKER_WINDOW_MS}ms after ${API.BODY_TIMEOUT_BREAKER_THRESHOLD} consecutive body timeouts`,
+      );
+    }
+    if (signal?.aborted) {
+      const err = new Error("The user aborted a request.");
+      err.name = "AbortError";
+      throw err;
+    }
     // Early reject via Content-Length when the server provides one. The
     // no-reader fallback (response.text()) cannot stream, so its size is
     // only enforced after the body is read; this header check closes the
@@ -178,6 +217,7 @@ export class API {
       }
     };
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let removeAbortListener: (() => void) | null = null;
     let text: string;
     try {
       text = await Promise.race([
@@ -199,11 +239,47 @@ export class API {
             reject(err);
           }, bodyTimeoutMs);
         }),
+        ...(signal
+          ? [
+              new Promise<string>((_, reject) => {
+                const onAbort = () => {
+                  // 流式分支：取消 reader 并以 AbortError 结算。无流分支 activeReader
+                  // 为 null，取消无法中断 text()，此处不拒绝，等待体读取完成或体超时结算。
+                  if (activeReader) {
+                    try {
+                      const p = activeReader.cancel();
+                      if (p && typeof (p as unknown as { catch?: unknown }).catch === "function") {
+                        (p as unknown as { catch: (fn: () => void) => void }).catch(() => {});
+                      }
+                    } catch {
+                      // reader 已释放等，忽略
+                    }
+                    const err = new Error("The user aborted a request.");
+                    err.name = "AbortError";
+                    reject(err);
+                  }
+                };
+                removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+                signal.addEventListener("abort", onAbort, { once: true });
+              }),
+            ]
+          : []),
       ]);
+    } catch (error) {
+      if (
+        breakerKey &&
+        error instanceof Error &&
+        (error.message.startsWith("RESPONSE_TIMEOUT") || error.name === "TimeoutError")
+      ) {
+        this.recordBodyTimeout(breakerKey);
+      }
+      throw error;
     } finally {
       if (timeoutId !== undefined) clearTimeout(timeoutId);
+      if (removeAbortListener) removeAbortListener();
     }
-    if (API.utf8ByteLength(text) > API.MAX_JSON_BYTES) {
+    if (breakerKey) this.resetBodyTimeout(breakerKey);
+    if (utf8ByteLength(text) > API.MAX_JSON_BYTES) {
       throw new Error(`RESPONSE_TOO_LARGE: body exceeded ${API.MAX_JSON_BYTES} bytes`);
     }
     return JSON.parse(text);
@@ -301,8 +377,16 @@ export class API {
 
       return response;
     } catch (error) {
-      // 中止错误（超时或调用方取消）转为更友好的错误信息
+      // OTV-4：区分错误来源。调用方已取消（callerSignal?.aborted）时抛 AbortError
+      // 语义错误（或直接透传），绝不伪装成超时；仅超时导致的中止才转为 REQUEST_TIMEOUT。
+      // 改动前已 grep：生产代码中 REQUEST_TIMEOUT 的字符串消费点只有本文件；
+      // stores/detailStore.ts 已按 error.name === "AbortError" 静默取消，OTV-4 后该判断
+      // 才能真正生效（此前取消被伪装成普通 Error，无法被静默）；其余调用方按通用错误处理，
+      // 无需另改。测试中依赖“取消也走超时分支”的断言已同步改为 AbortError（见 api.test.ts）。
       if (error instanceof Error && error.name === "AbortError") {
+        if (callerAborted()) {
+          throw abortError();
+        }
         throw new Error(`REQUEST_TIMEOUT: ${url}`);
       }
       throw error;
@@ -322,7 +406,7 @@ export class API {
     // headers.get() 读取（永远返回 null）。但原生网络层（OkHttp/NSURLSession）
     // 会自动管理 cookie jar，后续请求会自动携带 cookie。
     // 这里只存一个登录标记位，供 authStore.checkLoginStatus 判断用。
-    const result = await this.readJsonLimited(response);
+    const result = await this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "login");
     if (result && result.ok) {
       await AsyncStorage.setItem("authCookies", "1");
     }
@@ -335,18 +419,18 @@ export class API {
       method: "POST",
     });
     await AsyncStorage.setItem("authCookies", '');
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "logout");
   }
 
   async getServerConfig(): Promise<ServerConfig> {
     const response = await this._fetch("/api/server-config");
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "server-config");
   }
 
   async getFavorites(key?: string): Promise<Record<string, Favorite> | Favorite | null> {
     const url = key ? `/api/favorites?key=${encodeURIComponent(key)}` : "/api/favorites";
     const response = await this._fetch(url);
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "favorites");
   }
 
   async addFavorite(key: string, favorite: Omit<Favorite, "save_time">): Promise<{ success: boolean }> {
@@ -355,18 +439,18 @@ export class API {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key, favorite }),
     });
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "favorites");
   }
 
   async deleteFavorite(key?: string): Promise<{ success: boolean }> {
     const url = key ? `/api/favorites?key=${encodeURIComponent(key)}` : "/api/favorites";
     const response = await this._fetch(url, { method: "DELETE" });
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "favorites");
   }
 
   async getPlayRecords(): Promise<Record<string, PlayRecord>> {
     const response = await this._fetch("/api/playrecords");
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "playrecords");
   }
 
   async savePlayRecord(key: string, record: Omit<PlayRecord, "save_time">): Promise<{ success: boolean }> {
@@ -375,18 +459,18 @@ export class API {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key, record }),
     });
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "playrecords");
   }
 
   async deletePlayRecord(key?: string): Promise<{ success: boolean }> {
     const url = key ? `/api/playrecords?key=${encodeURIComponent(key)}` : "/api/playrecords";
     const response = await this._fetch(url, { method: "DELETE" });
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "playrecords");
   }
 
   async getSearchHistory(): Promise<string[]> {
     const response = await this._fetch("/api/searchhistory");
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "searchhistory");
   }
 
   async addSearchHistory(keyword: string): Promise<string[]> {
@@ -395,13 +479,13 @@ export class API {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ keyword }),
     });
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "searchhistory");
   }
 
   async deleteSearchHistory(keyword?: string): Promise<{ success: boolean }> {
     const url = keyword ? `/api/searchhistory?keyword=${encodeURIComponent(keyword)}` : "/api/searchhistory";
     const response = await this._fetch(url, { method: "DELETE" });
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "searchhistory");
   }
 
   getImageProxyUrl(imageUrl: string): string {
@@ -419,19 +503,19 @@ export class API {
   ): Promise<DoubanResponse> {
     const url = `/api/douban?type=${type}&tag=${encodeURIComponent(tag)}&pageSize=${pageSize}&pageStart=${pageStart}`;
     const response = await this._fetch(url);
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "douban");
   }
 
   async searchVideos(query: string): Promise<{ results: SearchResult[] }> {
     const url = `/api/search?q=${encodeURIComponent(query)}`;
     const response = await this._fetch(url);
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "search");
   }
 
   async searchVideo(query: string, resourceId: string, signal?: AbortSignal): Promise<{ results: SearchResult[] }> {
     const url = `/api/search/one?q=${encodeURIComponent(query)}&resourceId=${encodeURIComponent(resourceId)}`;
     const response = await this._fetch(url, { signal });
-    const { results } = await this.readJsonLimited(response);
+    const { results } = await this.readJsonLimited(response, API.DEFAULT_TIMEOUT, signal, "search");
     // 模糊匹配：归一化后比较（去空格、转小写），避免标题多一个符号就丢结果
     const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, "");
     const normalizedQuery = normalize(query);
@@ -445,13 +529,13 @@ export class API {
   async getResources(signal?: AbortSignal): Promise<ApiSite[]> {
     const url = `/api/search/resources`;
     const response = await this._fetch(url, { signal });
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, signal, "resources");
   }
 
   async getVideoDetail(source: string, id: string): Promise<VideoDetail> {
     const url = `/api/detail?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}`;
     const response = await this._fetch(url);
-    return this.readJsonLimited(response);
+    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "detail");
   }
 }
 
