@@ -67,7 +67,7 @@ describe("API._fetch 取消与 401 重试语义", () => {
     fetchMock.mockImplementation(pendingUntilAbort);
 
     const caller = new AbortController();
-    const promise = (api as any)._fetch("api/search?q=x", { signal: caller.signal }, 5000);
+    const promise = (api as any)._fetch("/api/search?q=x", { signal: caller.signal }, 5000);
     await waitFor(() => fetchMock.mock.calls.length === 1);
 
     caller.abort();
@@ -82,13 +82,13 @@ describe("API._fetch 取消与 401 重试语义", () => {
       () =>
         new Promise<boolean>((res) => {
           resolveRestorer = res;
-        }),
+        })
     );
     api.setSessionRestorer(restorer);
     fetchMock.mockResolvedValue(makeResponse(401));
 
     const caller = new AbortController();
-    const promise = (api as any)._fetch("api/search?q=x", { signal: caller.signal }, 5000);
+    const promise = (api as any)._fetch("/api/search?q=x", { signal: caller.signal }, 5000);
     await waitFor(() => restorer.mock.calls.length === 1);
 
     // 恢复尚在等待时用户取消，随后恢复返回成功
@@ -105,7 +105,7 @@ describe("API._fetch 取消与 401 重试语义", () => {
     fetchMock.mockResolvedValueOnce(makeResponse(401)).mockImplementationOnce(pendingUntilAbort);
 
     const caller = new AbortController();
-    const promise = (api as any)._fetch("api/search?q=x", { signal: caller.signal }, 5000);
+    const promise = (api as any)._fetch("/api/search?q=x", { signal: caller.signal }, 5000);
     await waitFor(() => fetchMock.mock.calls.length === 2);
 
     caller.abort();
@@ -116,23 +116,23 @@ describe("API._fetch 取消与 401 重试语义", () => {
   });
 
   it("③b 重试阶段取消（超时后换新 signal）：新信号同样受调用方取消联动", async () => {
-    // 恢复等待 60ms > 超时 30ms，重试必然走“换新组合 signal”分支
+    // 恢复等待 60ms > 超时 30ms，重试必然走"换新组合 signal"分支
     api.setSessionRestorer(
       jest.fn(async () => {
         await sleep(60);
         return true;
-      }),
+      })
     );
     fetchMock.mockResolvedValueOnce(makeResponse(401)).mockImplementationOnce(pendingUntilAbort);
 
     const caller = new AbortController();
-    const promise = (api as any)._fetch("api/search?q=x", { signal: caller.signal }, 30);
+    const promise = (api as any)._fetch("/api/search?q=x", { signal: caller.signal }, 30);
     await waitFor(() => fetchMock.mock.calls.length === 2);
 
     const firstSignal = fetchMock.mock.calls[0][1].signal as AbortSignal;
     const retrySignal = fetchMock.mock.calls[1][1].signal as AbortSignal;
     expect(retrySignal).not.toBe(firstSignal);
-    expect(firstSignal.aborted).toBe(true); // 超时中止
+    expect(firstSignal.aborted).toBe(true); // 因超时中止
     expect(retrySignal.aborted).toBe(false);
 
     caller.abort();
@@ -141,20 +141,20 @@ describe("API._fetch 取消与 401 重试语义", () => {
     expect(retrySignal.aborted).toBe(true); // 调用方取消联动到了新信号
   });
 
-  it("④ 超时（非取消）后 401 恢复重试仍可成功，防护正常重试惨死", async () => {
+  it("④ 超时（非取消）后 401 恢复重试仍可成功，防把正常重试修死", async () => {
     // 恢复等待 60ms > 超时 30ms：首次 signal 被超时中止，但调用方从未取消
     api.setSessionRestorer(
       jest.fn(async () => {
         await sleep(60);
         return true;
-      }),
+      })
     );
     fetchMock
       .mockResolvedValueOnce(makeResponse(401))
       .mockResolvedValueOnce(makeResponse(200, { ok: true }));
 
     const caller = new AbortController();
-    const response = await (api as any)._fetch("api/search?q=x", { signal: caller.signal }, 30);
+    const response = await (api as any)._fetch("/api/search?q=x", { signal: caller.signal }, 30);
 
     expect(response.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -170,7 +170,7 @@ describe("API._fetch 取消与 401 重试语义", () => {
     api.setSessionRestorer(jest.fn(async () => false));
     fetchMock.mockResolvedValue(makeResponse(401));
 
-    await expect((api as any)._fetch("api/search?q=x", {}, 5000)).rejects.toThrow("UNAUTHORIZED");
+    await expect((api as any)._fetch("/api/search?q=x", {}, 5000)).rejects.toThrow("UNAUTHORIZED");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -178,7 +178,7 @@ describe("API._fetch 取消与 401 重试语义", () => {
     // pendingUntilAbort 监听 _fetch 组合的超时信号：超时中止后 fetch 以 AbortError
     // 拒绝，调用方未取消时 _fetch 将其转为 REQUEST_TIMEOUT，与调用方取消区分。
     fetchMock.mockImplementation(pendingUntilAbort);
-    const promise = (api as any)._fetch("api/search?q=x", {}, 30);
+    const promise = (api as any)._fetch("/api/search?q=x", {}, 30);
     await expect(promise).rejects.toThrow(/^REQUEST_TIMEOUT/);
   });
 });
@@ -198,14 +198,14 @@ describe("API URL 参数编码", () => {
   });
 
   it("⑤ deleteSearchHistory 对含 &、#、空格、中文的 keyword 正确编码", async () => {
-    const keyword = "a&# 中文 x";
+    const keyword = "a&b#c 中文 x";
     await api.deleteSearchHistory(keyword);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe(
-      `${BASE}/api/searchhistory?keyword=${encodeURIComponent(keyword)}`,
+      `${BASE}/api/searchhistory?keyword=${encodeURIComponent(keyword)}`
     );
-    // 拼接会把 & 变成第二个参数、# 变成片段，这里确保两者都已被转义
-    expect(fetchMock.mock.calls[0][0]).toContain("keyword=a%26%23%20");
+    // 裸拼会把 & 变成第二个参数、# 变成片段，这里确保两者都已被转义
+    expect(fetchMock.mock.calls[0][0]).toContain("keyword=a%26b%23c%20");
   });
 
   it("⑤ getVideoDetail 对含 &、#、空格、中文的 source/id 正确编码", async () => {
@@ -214,7 +214,7 @@ describe("API URL 参数编码", () => {
     await api.getVideoDetail(source, id);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe(
-      `${BASE}/api/detail?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}`,
+      `${BASE}/api/detail?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}`
     );
     expect(fetchMock.mock.calls[0][0]).toContain("source=src%261");
     expect(fetchMock.mock.calls[0][0]).toContain("id=id%20%232%20");
