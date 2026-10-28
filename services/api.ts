@@ -14,6 +14,65 @@ export interface DoubanResponse {
   list: DoubanItem[];
 }
 
+// --- OrionTV CMS 分类筛选（直连 agg，不走 MoonTV baseURL / 401 重登）---
+// 筛选字段与 agg 服务端完全一致，直接透传，App 内不做二次筛选过滤。
+export interface AggFilters {
+  cate: string;
+  area: string;
+  year: string;
+  lang: string;
+  score: string;
+  order: string;
+}
+
+export const EMPTY_AGG_FILTERS: AggFilters = {
+  cate: "",
+  area: "",
+  year: "",
+  lang: "",
+  score: "",
+  order: "",
+};
+
+export interface AggFilterOption {
+  n: string;
+  v: string;
+}
+
+export interface AggFilterGroup {
+  key: "cate" | "area" | "year" | "lang" | "score" | "order";
+  name: string;
+  value: AggFilterOption[];
+}
+
+export interface AggVideoItem {
+  vod_id: string;
+  vod_name: string;
+  vod_pic: string;
+  vod_year?: string;
+  vod_area?: string;
+  vod_lang?: string;
+  vod_class?: string;
+  vod_douban_score?: string;
+  vod_remarks?: string;
+  type_name?: string;
+}
+
+export interface AggCategoryResponse {
+  code: number;
+  msg: string;
+  page: number;
+  pagecount: number;
+  limit: number;
+  total: number;
+  list: AggVideoItem[];
+  class?: Array<{ type_id: number; type_name: string }>;
+  filters?: AggFilterGroup[];
+}
+
+// agg 地址固定，不放进用户可改的设置项，避免误改后筛选全挂。
+const AGG_BASE_URL = "https://ysp.ciweihaha.win/agg";
+
 export interface VideoDetail {
   id: string;
   title: string;
@@ -504,6 +563,48 @@ export class API {
     const url = `/api/douban?type=${type}&tag=${encodeURIComponent(tag)}&pageSize=${pageSize}&pageStart=${pageStart}`;
     const response = await this._fetch(url);
     return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "douban");
+  }
+
+  /**
+   * CMS 分类：直连 agg，禁止走 _fetch（_fetch 会拼 MoonTV baseURL 并做 401 重登，
+   * agg 不需要登录、不在同一个 origin）。超时 15 秒、响应体 2MB 上限与豆瓣一致，
+   * 由全局 fetch 的 AbortController 与 readJsonLimited 共同保证。
+   * pg 为 1-based，与豆瓣 pageStart 的 offset 语义不同，调用方不得混用。
+   */
+  async getAggCategory(
+    t: 1 | 2 | 3 | 4,
+    pg: number,
+    filters: AggFilters,
+  ): Promise<AggCategoryResponse> {
+    // 不用 URLSearchParams（RN/Hermes 环境兼容性不如 encodeURIComponent 稳妥），
+    // 逐个 encodeURIComponent 拼接；空值省略，缓存 key 的归一化同样按空值处理（见 homeStore.getCacheKey），两者一致。
+    const parts = [`ac=videolist`, `t=${t}`, `pg=${pg}`];
+    (["cate", "area", "year", "lang", "score", "order"] as const).forEach((key) => {
+      const value = filters[key];
+      if (value) parts.push(`${key}=${encodeURIComponent(value)}`);
+    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), API.DEFAULT_TIMEOUT);
+    try {
+      const response = await fetch(`${AGG_BASE_URL}?${parts.join("&")}`, {
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data: AggCategoryResponse = await this.readJsonLimited(
+        response,
+        API.DEFAULT_TIMEOUT,
+        undefined,
+        "agg",
+      );
+      if (!data || data.code !== 1 || !Array.isArray(data.list)) {
+        throw new Error("AGG_INVALID_RESPONSE");
+      }
+      return data;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   async searchVideos(query: string): Promise<{ results: SearchResult[] }> {
