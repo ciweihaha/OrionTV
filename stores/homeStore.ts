@@ -155,6 +155,13 @@ interface HomeState {
   // index.tsx 的 effect 对 CMS 模式不重复触发（见 index.tsx 注释），避免一次筛选发两次请求。
   setAggFilters: (filters: Partial<AggFilters>) => Promise<void>;
   clearAggFilters: () => Promise<void>;
+  // 1.4.1 筛选栏可见性：纯 UI 状态，默认 false（隐藏），与筛选值、缓存 key、
+  // 分页、回落逻辑完全无关。非 CMS 分类不渲染开关，故该值在非 CMS 下无意义；
+  // 切换分类时由 selectCategory 重置为 false（点到新类目又是隐藏的）。
+  // 筛选值变化（setAggFilters / clearAggFilters）不得改动它：选完不自动收起。
+  filtersVisible: boolean;
+  toggleFilters: () => void;
+  setFiltersVisible: (visible: boolean) => void;
   refreshPlayRecords: () => Promise<void>;
   clearError: () => void;
 }
@@ -172,6 +179,8 @@ const useHomeStore = create<HomeState>((set, get) => ({
   aggPage: 0,
   hasMore: true,
   error: null,
+  // 1.4.1：进入任何分类时筛选栏默认隐藏，内容网格直接可见。
+  filtersVisible: false,
 
   fetchInitialData: async () => {
     const { apiBaseUrl } = useSettingsStore.getState();
@@ -453,13 +462,16 @@ const useHomeStore = create<HomeState>((set, get) => ({
     if (currentCategory.title !== category.title || currentCategory.tag !== category.tag || currentCategory.cmsType !== category.cmsType || filtersChanged) {
       // 切换分类即回到该分类的初始筛选（initialCategories 里的 EMPTY），
       // 不把上一个 CMS 分类的筛选带到新分类；豆瓣分类本身不带 filters，天然清空。
+      // 1.4.1：切换分类同时重置筛选栏为隐藏——点到新类目时筛选又是隐藏的，
+      // 要点开关才出来；同分类重选（未进本分支）不重置，展开状态不受影响。
       set({
         selectedCategory: category,
         contentData: [],
         pageStart: 0,
         aggPage: 0,
         hasMore: true,
-        error: null
+        error: null,
+        filtersVisible: false
       });
 
       if (category.type === 'record') {
@@ -493,6 +505,7 @@ const useHomeStore = create<HomeState>((set, get) => ({
     if (JSON.stringify(merged) === JSON.stringify(cat.filters || EMPTY_AGG_FILTERS)) return;
     // CMS 与豆瓣 tag 互斥：选筛选即把 tag 置空，避免 tag + 筛选双重过滤。
     // 加载唯一入口就是这里的 fetchInitialData（index.tsx 对 CMS 模式不走 effect 重复加载）。
+    // 1.4.1：选筛选不改 filtersVisible——展开状态保持不变，可连选多组。
     set({
       selectedCategory: { ...cat, filters: merged, tag: undefined, cmsFallback: false },
       contentData: [],
@@ -519,6 +532,19 @@ const useHomeStore = create<HomeState>((set, get) => ({
       loading: true,
     });
     await get().fetchInitialData();
+  },
+
+  // 1.4.1 筛选栏开关：只改 filtersVisible，不触发任何加载、不改筛选值、
+  // 不改缓存、不改分页。展开/收起后焦点不由 store 决定（见 index.tsx 注释）：
+  // 开关本身始终挂载，是收起后的焦点落点；筛选值选择、重置均不调用本函数，
+  // 故选完不自动收起。非 CMS 分类下调用亦无害（index.tsx 不渲染开关）。
+  toggleFilters: () => {
+    set((state) => ({ filtersVisible: !state.filtersVisible }));
+  },
+
+  setFiltersVisible: (visible: boolean) => {
+    if (get().filtersVisible === visible) return;
+    set({ filtersVisible: visible });
   },
 
   refreshPlayRecords: async () => {
