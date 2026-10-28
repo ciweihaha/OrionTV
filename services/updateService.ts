@@ -19,8 +19,8 @@ interface VersionInfo {
  */
 const ANDROID_MIME_TYPE = 'application/vnd.android.package-archive';
 
-/** 版本检查请求超时（毫秒） */
-const VERSION_CHECK_TIMEOUT_MS = 10_000;
+/** 版本检查请求超时（毫秒，2026-10-28：10 秒放宽到 20 秒，国内网络容错） */
+const VERSION_CHECK_TIMEOUT_MS = 20_000;
 /** SHA256 文件获取超时（毫秒） */
 const SHA256_FETCH_TIMEOUT_MS = 15_000;
 /**
