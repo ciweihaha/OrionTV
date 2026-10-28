@@ -44,6 +44,9 @@ export default function HomeScreen() {
     selectCategory,
     setAggFilters,
     clearAggFilters,
+    filtersVisible,
+    toggleFilters,
+    setFiltersVisible,
     refreshPlayRecords,
     clearError,
   } = useHomeStore();
@@ -57,11 +60,20 @@ export default function HomeScreen() {
   );
 
     // 双击返回退出逻辑（只限当前页面）
+  // 1.4.1：筛选正展开时，返回键先收起筛选，不走双击退出、不弹退出提示、
+  // 不直接退出分类；收起后把双击计时清零，下一次返回重新计双击。
+  // 依赖 filtersVisible：可见性变化时重新注册 handler，否则闭包会一直读到旧值。
   const backPressTimeRef = useRef<number | null>(null);
 
   useFocusEffect(
     useCallback(() => {
     const handleBackPress = () => {
+      if (filtersVisible) {
+        setFiltersVisible(false);
+        backPressTimeRef.current = null;
+        return true; // 已消费：只收起筛选
+      }
+
       const now = Date.now();
 
       // 如果还没按过返回键，或距离上次超过2秒
@@ -86,7 +98,7 @@ export default function HomeScreen() {
         backPressTimeRef.current = null;
       };
     }
-  }, [])
+  }, [filtersVisible, setFiltersVisible])
 );
 
   // 统一的数据获取逻辑
@@ -165,22 +177,28 @@ export default function HomeScreen() {
   // CMS 筛选：UI 只转发给 store，不持有业务状态（筛选不走本地状态，见方案第 3 节）。
   // 选项的 v（不是 n）才是 agg 参数值，“全部/默认”的 v 为空串，点它等于清空该组。
   const isCmsCategory = !!selectedCategory?.cmsType;
+  // 1.4.1：筛选栏是否渲染只由开关决定，与筛选值、选项、回落无关。
+  // 默认 false（隐藏），切换分类时 store 已重置为 false。
+  const isFilterExpanded = isCmsCategory && filtersVisible;
   const activeFilters = selectedCategory?.filters || EMPTY_AGG_FILTERS;
   const isFiltered = Object.values(activeFilters).some((v) => !!v);
   const handleFilterSelect = (key: AggFilterGroup["key"], value: string) => {
     setAggFilters({ [key]: value } as Partial<typeof activeFilters>);
   };
 
-  const renderFilterGroup = ({ item: group, index: groupIndex }: { item: AggFilterGroup; index: number }) => (
+  // 1.4.1 焦点说明：筛选选项不再带 hasTVPreferredFocus。1.4.0 里第一组首项
+  // 自动抢焦点，在开关控制下会变成“每次展开都强行跳到首项”，且展开后用户
+  // 难以回到开关收起。改为空间导航：焦点停在开关上，按下方向键自然进入
+  // 筛选排，再按下进入内容网格；选值只改 isSelected，不移动焦点。
+  const renderFilterGroup = ({ item: group }: { item: AggFilterGroup }) => (
     <View style={dynamicStyles.filterRow}>
       <ThemedText style={dynamicStyles.filterGroupName}>{group.name}</ThemedText>
       <FlatList
         data={group.value}
-        renderItem={({ item, index }) => {
+        renderItem={({ item }) => {
           const isSelected = (activeFilters[group.key] || "") === item.v;
           return (
             <StyledButton
-              hasTVPreferredFocus={groupIndex === 0 && index === 0}
               text={item.n}
               onPress={() => handleFilterSelect(group.key, item.v)}
               isSelected={isSelected}
@@ -326,6 +344,13 @@ export default function HomeScreen() {
       paddingBottom: spacing / 2,
       paddingHorizontal: spacing,
     },
+    // 1.4.1 筛选开关行：一行紧凑高度，收起时筛选排不渲染，故不占筛选高度。
+    filterToggleRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingBottom: spacing / 2,
+      paddingHorizontal: spacing,
+    },
     filterGroupName: {
       fontSize: deviceType === "mobile" ? 14 : 16,
       fontWeight: "500",
@@ -383,11 +408,35 @@ export default function HomeScreen() {
         </View>
       )}
 
-      {/* CMS 筛选栏：第三排起，仅 CMS 分类渲染；首屏未返回选项前不渲染空栏占位，
-          选项返回后才出现（loadMoreData 把 agg 的 filters 存入 filterOptions）。
-          筛选变化不强行拉回首项：只有第一组第一个选项带 hasTVPreferredFocus，
-          且仅在筛选栏首次出现时生效，之后靠遥控方向键自然移动。 */}
-      {isCmsCategory && selectedCategory.filterOptions && selectedCategory.filterOptions.length > 0 && (
+      {/* 1.4.1 筛选开关：仅 CMS 分类渲染，紧贴分类排下方，一行紧凑高度。
+          开关本身始终挂载（展开/收起都不卸载），是收起后的焦点落点：
+          展开时焦点停在开关上，按下进入筛选排；收起时筛选排卸载，焦点
+          回到开关，从开关上按一下进入分类排、下按进入内容网格首项。
+          非 CMS 分类（热门剧集、豆瓣 Top250、最近播放）不渲染开关、不出筛选。
+          开关不带 hasTVPreferredFocus：不抢分类排的焦点，不在切换分类时跳焦点。
+          收起时若已有筛选，文案带“已选”提示，避免隐藏的筛选被遗忘；
+          展开时文案为“收起”，选值、重置均不自动收起。 */}
+      {isCmsCategory && (
+        <View style={dynamicStyles.filterToggleRow}>
+          <StyledButton
+            text={filtersVisible ? "收起 ▴" : isFiltered ? "筛选 • 已选 ▾" : "筛选 ▾"}
+            onPress={() => toggleFilters()}
+            isSelected={filtersVisible}
+            style={dynamicStyles.categoryButton}
+            textStyle={dynamicStyles.categoryText}
+            variant="ghost"
+          />
+          {selectedCategory?.cmsFallback && (
+            <ThemedText style={dynamicStyles.categoryText}>已回落豆瓣</ThemedText>
+          )}
+        </View>
+      )}
+
+      {/* CMS 筛选栏：仅开关展开时渲染，收起时完全不占高度（条件渲染，不是用
+          高度/透明度藏起来），内容网格直接顶上来可见。首屏未返回选项前，
+          即使已展开也不渲染空栏占位，选项返回后才出现（loadMoreData 把 agg
+          的 filters 存入 filterOptions）。选值、重置均不收起，可连选多组。 */}
+      {isFilterExpanded && selectedCategory.filterOptions && selectedCategory.filterOptions.length > 0 && (
         <View>
           <FlatList
             data={selectedCategory.filterOptions}
