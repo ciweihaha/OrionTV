@@ -5,9 +5,10 @@ export const UPDATE_CONFIG = {
   // 检查更新间隔（毫秒）
   CHECK_INTERVAL: 12 * 60 * 60 * 1000, // 12小时
 
-  // GitHub相关URL（直连官方域名，不再经任何第三方镜像中转）
+  // 更新检查URL（2026-10-28：改用自有 Cloudflare 域名，国内电视可直连；
+  // 接口自身返回 no-cache，不再用 ?t= 时间戳绕缓存）
   GITHUB_RAW_URL:
-    `https://raw.githubusercontent.com/ciweihaha/OrionTV/refs/heads/master/package.json?t=${Date.now()}`,
+    `https://ysp.ciweihaha.win/agg?ac=oriontv-version`,
 
   // 获取平台特定的下载URL
   getDownloadUrl(version: string): string {
