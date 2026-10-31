@@ -551,7 +551,18 @@ export class API {
     if (!imageUrl || typeof imageUrl !== "string" || !imageUrl.trim()) {
       return "";
     }
-    return `${this.baseURL}/api/image-proxy?url=${encodeURIComponent(imageUrl)}`;
+    // 1.4.2: only Douban posters go through the MoonTV image proxy, all others load direct.
+    // MoonTV image proxy has a host allowlist and blocks agg poster hosts (e.g. p.lztutu.com) with 403, causing blank posters in 1.4.0/1.4.1. CMS image hosts allow direct hotlink. Douban posters still need the proxy for anti-hotlink.
+    let hostname = "";
+    try {
+      hostname = new URL(imageUrl).hostname.toLowerCase();
+    } catch {
+      return imageUrl;
+    }
+    if (hostname.endsWith(".doubanio.com")) {
+      return `${this.baseURL}/api/image-proxy?url=${encodeURIComponent(imageUrl)}`;
+    }
+    return imageUrl;
   }
 
   async getDoubanData(

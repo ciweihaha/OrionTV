@@ -55,7 +55,7 @@ const LoginModal = () => {
   // Focus management with better TV remote handling
   useEffect(() => {
     if (isModalReady && isLoginModalVisible && !isSettingsPage) {
-      const isUsernameVisible = serverConfig?.StorageType !== "localstorage";
+      const isUsernameVisible = !!serverConfig && serverConfig.StorageType !== "localstorage";
 
       // Use a small delay to ensure the modal is fully rendered
       const focusTimeout = setTimeout(() => {
@@ -79,7 +79,7 @@ const LoginModal = () => {
   }, []);
 
   const handleLogin = async () => {
-    const isLocalStorage = serverConfig?.StorageType === "localstorage";
+    const isLocalStorage = !serverConfig || serverConfig.StorageType === "localstorage";
     if (!password || (!isLocalStorage && !username)) {
       Toast.show({ type: "error", text1: "请输入用户名和密码" });
       return;
@@ -148,7 +148,7 @@ const LoginModal = () => {
         <ThemedView style={styles.container}>
           <ThemedText style={styles.title}>需要登录</ThemedText>
           <ThemedText style={styles.subtitle}>服务器需要验证您的身份</ThemedText>
-          {serverConfig?.StorageType !== "localstorage" && (
+          {serverConfig && serverConfig.StorageType !== "localstorage" && (
             <TextInput
               ref={usernameInputRef}
               style={styles.input}

@@ -419,7 +419,7 @@ export default function HomeScreen() {
       {isCmsCategory && (
         <View style={dynamicStyles.filterToggleRow}>
           <StyledButton
-            text={filtersVisible ? "收起 ▴" : isFiltered ? "筛选 • 已选 ▾" : "筛选 ▾"}
+            text={filtersVisible ? "收起筛选" : isFiltered ? "筛选（已选）" : "筛选"}
             onPress={() => toggleFilters()}
             isSelected={filtersVisible}
             style={dynamicStyles.categoryButton}
