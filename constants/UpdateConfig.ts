@@ -12,7 +12,7 @@ export const UPDATE_CONFIG = {
 
   // 获取平台特定的下载URL
   getDownloadUrl(version: string): string {
-    return `https://github.com/ciweihaha/OrionTV/releases/download/v${version}/orionTV.${version}.apk`;
+          return `https://dl.ciweihaha.win/orionTV.${version}.apk`;
   },
 
   // 是否显示更新日志
