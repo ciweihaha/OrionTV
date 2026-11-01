@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, forwardRef } from "react";
-import { View, Text, Image, StyleSheet, TouchableOpacity, Alert, Animated } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, Alert, Animated } from "react-native";
+import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import { Star, Play } from "lucide-react-native";
 import { PlayRecordManager } from "@/services/storage";
@@ -150,7 +151,15 @@ const VideoCardTablet = forwardRef<View, VideoCardTabletProps>(
           delayLongPress={900}
         >
           <View style={[styles.card, isPressed && styles.cardPressed]}>
-            <Image source={{ uri: api.getImageProxyUrl(poster) }} style={styles.poster} />
+            <Image
+              source={{ uri: api.getImageProxyUrl(poster) }}
+              style={styles.poster}
+              contentFit="cover"
+              transition={200}
+              recyclingKey={poster}
+              placeholder={null}
+              accessibilityLabel={title}
+            />
             
             {/* 悬停效果遮罩 */}
             {isPressed && (

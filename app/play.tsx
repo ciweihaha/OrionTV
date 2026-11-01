@@ -204,7 +204,7 @@ export default function PlayScreen() {
           usePlayerStore.setState({ isLoading: false });
           Toast.show({ type: "error", text1: "播放超时，请重试" });
         }
-      }, 60000); // 1 minute
+      }, 20000); // 20 秒（V1.5：60s 太久，黑屏干等体验差；失败路径已接 handleVideoError 自动换源）
     }
 
     return () => {

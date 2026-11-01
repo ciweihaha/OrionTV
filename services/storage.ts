@@ -14,6 +14,9 @@ const STORAGE_KEYS = {
   PLAY_RECORDS: "mytv_play_records",
   SEARCH_HISTORY: "mytv_search_history",
   LOGIN_CREDENTIALS: "mytv_login_credentials",
+  M3U_CACHE_PREFIX: "mytv_m3u_cache_",
+  LIVE_LAST_CHANNEL: "mytv_live_last_channel",
+  LIVE_FAV_CHANNELS: "mytv_live_fav_channels",
 } as const;
 
 // --- Type Definitions (aligned with api.ts) ---
@@ -328,6 +331,115 @@ export class SearchHistoryManager {
       return;
     }
     await api.deleteSearchHistory();
+  }
+}
+
+// --- M3U 列表缓存（V1.5：直播页秒进） ---
+/** m3u 磁盘缓存有效期（毫秒）：7 天内直接用缓存，后台刷新成功后更新 */
+const M3U_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** 缓存 JSON 体积上限：超大列表不落盘（AsyncStorage 单 key 6MB 上限的一半，留安全余量） */
+const MAX_M3U_CACHE_BYTES = 3 * 1024 * 1024;
+
+export interface M3uCacheEntry {
+  ts: number;
+  channels: { id: string; name: string; url: string; logo: string; group: string }[];
+}
+
+export class M3uCacheManager {
+  static async get(m3uUrl: string): Promise<M3uCacheEntry | null> {
+    try {
+      const data = await AsyncStorage.getItem(STORAGE_KEYS.M3U_CACHE_PREFIX + m3uUrl);
+      if (!data) return null;
+      // 体积预检：JSON 超限视为不可用（读回大字符串也耗时）
+      if (data.length > MAX_M3U_CACHE_BYTES) return null;
+      const entry = JSON.parse(data) as M3uCacheEntry;
+      if (!entry || !Array.isArray(entry.channels)) return null;
+      if (Date.now() - entry.ts > M3U_CACHE_TTL_MS) return null; // 过期视为未命中
+      return entry;
+    } catch (error) {
+      logger.info("Failed to get m3u cache:", error);
+      return null;
+    }
+  }
+
+  static async save(m3uUrl: string, channels: M3uCacheEntry["channels"]): Promise<void> {
+    try {
+      const entry: M3uCacheEntry = { ts: Date.now(), channels };
+      const json = JSON.stringify(entry);
+      if (json.length > MAX_M3U_CACHE_BYTES) {
+        logger.info(`m3u cache skipped (too large): ${json.length} bytes`);
+        return;
+      }
+      await AsyncStorage.setItem(STORAGE_KEYS.M3U_CACHE_PREFIX + m3uUrl, json);
+    } catch (error) {
+      logger.info("Failed to save m3u cache:", error);
+    }
+  }
+
+  static async clear(): Promise<void> {
+    try {
+      const keys = await AsyncStorage.getAllKeys();
+      const m3uKeys = keys.filter((k) => k.startsWith(STORAGE_KEYS.M3U_CACHE_PREFIX));
+      if (m3uKeys.length > 0) await AsyncStorage.multiRemove(m3uKeys);
+    } catch (error) {
+      logger.info("Failed to clear m3u cache:", error);
+    }
+  }
+}
+
+// --- 直播频道偏好（V1.5：上次频道 + 频道收藏） ---
+export interface LiveLastChannel {
+  url: string;
+  name: string;
+}
+
+export class LiveChannelPrefsManager {
+  /** 记住上次观看的直播频道（按 url 恢复，列表刷新后仍能定位） */
+  static async getLastChannel(): Promise<LiveLastChannel | null> {
+    try {
+      const data = await AsyncStorage.getItem(STORAGE_KEYS.LIVE_LAST_CHANNEL);
+      return data ? JSON.parse(data) : null;
+    } catch (error) {
+      logger.info("Failed to get last live channel:", error);
+      return null;
+    }
+  }
+
+  static async saveLastChannel(channel: LiveLastChannel): Promise<void> {
+    try {
+      await AsyncStorage.setItem(STORAGE_KEYS.LIVE_LAST_CHANNEL, JSON.stringify(channel));
+    } catch (error) {
+      logger.info("Failed to save last live channel:", error);
+    }
+  }
+
+  /** 收藏的直播频道（本地存储，不进点播收藏体系；上限 100 防无限增长） */
+  static async getFavChannels(): Promise<LiveLastChannel[]> {
+    try {
+      const data = await AsyncStorage.getItem(STORAGE_KEYS.LIVE_FAV_CHANNELS);
+      return data ? JSON.parse(data) : [];
+    } catch (error) {
+      logger.info("Failed to get favorite live channels:", error);
+      return [];
+    }
+  }
+
+  static async toggleFavChannel(channel: LiveLastChannel): Promise<boolean> {
+    const favs = await this.getFavChannels();
+    const idx = favs.findIndex((c) => c.url === channel.url);
+    if (idx >= 0) {
+      favs.splice(idx, 1);
+      await AsyncStorage.setItem(STORAGE_KEYS.LIVE_FAV_CHANNELS, JSON.stringify(favs));
+      return false; // 已取消收藏
+    }
+    favs.unshift({ url: channel.url, name: channel.name });
+    if (favs.length > 100) favs.length = 100;
+    await AsyncStorage.setItem(STORAGE_KEYS.LIVE_FAV_CHANNELS, JSON.stringify(favs));
+    return true; // 已收藏
+  }
+
+  static isFavChannels(favs: LiveLastChannel[], url: string): boolean {
+    return favs.some((c) => c.url === url);
   }
 }
 

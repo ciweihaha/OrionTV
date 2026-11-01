@@ -1,16 +1,17 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { View, TextInput, StyleSheet, Alert, Keyboard, TouchableOpacity } from "react-native";
 import { ThemedView } from "@/components/ThemedView";
 import { ThemedText } from "@/components/ThemedText";
 import VideoCard from "@/components/VideoCard";
 import VideoLoadingAnimation from "@/components/VideoLoadingAnimation";
 import { api, SearchResult } from "@/services/api";
-import { Search, QrCode } from "lucide-react-native";
+import { Search, QrCode, X } from "lucide-react-native";
 import { StyledButton } from "@/components/StyledButton";
 import { useRemoteControlStore } from "@/stores/remoteControlStore";
 import { RemoteControlModal } from "@/components/RemoteControlModal";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { useRouter } from "expo-router";
+import { useRouter, useFocusEffect } from "expo-router";
+import { SearchHistoryManager } from "@/services/storage";
 import { Colors } from "@/constants/Colors";
 import CustomScrollView from "@/components/CustomScrollView";
 import { useResponsiveLayout } from "@/hooks/useResponsiveLayout";
@@ -27,11 +28,19 @@ export default function SearchScreen() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [searchHistory, setSearchHistory] = useState<string[]>([]);
   const textInputRef = useRef<TextInput>(null);
   const [isInputFocused, setIsInputFocused] = useState(false);
   const { showModal: showRemoteModal, lastMessage, targetPage, clearMessage } = useRemoteControlStore();
   const { remoteInputEnabled } = useSettingsStore();
   const router = useRouter();
+
+  // 搜索历史（V1.5）：进入页面时加载
+  useFocusEffect(
+    useCallback(() => {
+      SearchHistoryManager.get().then(setSearchHistory).catch(() => {});
+    }, [])
+  );
 
   // 响应式布局配置
   const responsiveConfig = useResponsiveLayout();
@@ -96,6 +105,8 @@ export default function SearchScreen() {
           const response = await api.searchVideos(term);
           if (response.results.length > 0) {
             setResults(response.results);
+            // 搜索成功后记录历史（V1.5）
+            SearchHistoryManager.add(term).then(() => SearchHistoryManager.get()).then(setSearchHistory).catch(() => {});
           } else {
             setError("没有找到相关内容");
           }
@@ -112,6 +123,15 @@ export default function SearchScreen() {
   };
 
   const onSearchPress = () => handleSearch();
+
+  const handleHistoryPress = (term: string) => {
+    setKeyword(term);
+    handleSearch(term);
+  };
+
+  const clearHistory = () => {
+    SearchHistoryManager.clear().then(() => setSearchHistory([])).catch(() => {});
+  };
 
   const handleQrPress = () => {
     if (!remoteInputEnabled) {
@@ -177,9 +197,32 @@ export default function SearchScreen() {
 
       {loading ? (
         <VideoLoadingAnimation showProgressBar={false} />
-      ) : error ? (
+      ) : error || results.length === 0 ? (
         <View style={[commonStyles.center, { flex: 1 }]}>
-          <ThemedText style={dynamicStyles.errorText}>{error}</ThemedText>
+          {/* 搜索历史（V1.5）：无结果时展示，TV 遥控器打字成本高 */}
+          {searchHistory.length > 0 && (
+            <View style={dynamicStyles.historyContainer}>
+              <View style={dynamicStyles.historyHeader}>
+                <ThemedText style={dynamicStyles.historyTitle}>搜索历史</ThemedText>
+                <TouchableOpacity onPress={clearHistory} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <ThemedText style={dynamicStyles.historyClear}>清空</ThemedText>
+                </TouchableOpacity>
+              </View>
+              <View style={dynamicStyles.historyChips}>
+                {searchHistory.map((term) => (
+                  <TouchableOpacity
+                    key={term}
+                    style={dynamicStyles.historyChip}
+                    onPress={() => handleHistoryPress(term)}
+                  >
+                    <ThemedText style={dynamicStyles.historyChipText} numberOfLines={1}>{term}</ThemedText>
+                    <X size={12} color="#888" />
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
+          {error && <ThemedText style={dynamicStyles.errorText}>{error}</ThemedText>}
         </View>
       ) : (
         <CustomScrollView
@@ -264,6 +307,44 @@ const createResponsiveStyles = (deviceType: string, spacing: number) => {
       color: "red",
       fontSize: isMobile ? 14 : 16,
       textAlign: "center",
+    },
+    historyContainer: {
+      width: "100%",
+      paddingHorizontal: spacing,
+    },
+    historyHeader: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: spacing / 2,
+    },
+    historyTitle: {
+      fontSize: isMobile ? 15 : 16,
+      fontWeight: "bold",
+      color: "#ccc",
+    },
+    historyClear: {
+      fontSize: 13,
+      color: "#888",
+    },
+    historyChips: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: spacing / 3,
+    },
+    historyChip: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      backgroundColor: "#2c2c2e",
+      borderRadius: 16,
+      paddingVertical: isMobile ? minTouchTarget / 5 : 8,
+      paddingHorizontal: spacing / 2,
+      maxWidth: "48%",
+    },
+    historyChipText: {
+      fontSize: isMobile ? 13 : 14,
+      color: "#ddd",
     },
   });
 };

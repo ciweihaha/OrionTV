@@ -1,5 +1,6 @@
 import Logger from '@/utils/Logger';
 import { utf8ByteLength } from '../utils/utf8ByteLength';
+import { M3uCacheManager } from './storage';
 
 const logger = Logger.withTag('M3U');
 
@@ -89,6 +90,37 @@ export const getPlayableUrl = (originalUrl: string | null): string | null => {
   }
   // 直播流地址直接播放（历史代理方案已下线）。
   return originalUrl;
+};
+
+// ---------- V1.5：直播列表缓存（秒进直播页） ----------
+// 内存缓存：会话内复用解析结果，避免重复解析大列表
+const m3uMemCache = new Map<string, Channel[]>();
+
+/**
+ * 读取缓存的频道列表：内存 → 磁盘（7 天有效）。未命中返回空数组。
+ * 配合 refreshM3u 使用：先用缓存即时渲染，再拉网络更新。
+ */
+export const getCachedM3u = async (m3uUrl: string): Promise<Channel[]> => {
+  const mem = m3uMemCache.get(m3uUrl);
+  if (mem && mem.length > 0) return mem;
+  const disk = await M3uCacheManager.get(m3uUrl);
+  if (disk && disk.channels.length > 0) {
+    m3uMemCache.set(m3uUrl, disk.channels);
+    return disk.channels;
+  }
+  return [];
+};
+
+/**
+ * 从网络刷新频道列表并写入两级缓存；失败或空列表返回空数组（不覆盖旧缓存）。
+ */
+export const refreshM3u = async (m3uUrl: string): Promise<Channel[]> => {
+  const channels = await fetchAndParseM3u(m3uUrl);
+  if (channels.length > 0) {
+    m3uMemCache.set(m3uUrl, channels);
+    await M3uCacheManager.save(m3uUrl, channels);
+  }
+  return channels;
 };
 
 /**

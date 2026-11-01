@@ -1,5 +1,6 @@
 import React, { useEffect } from "react";
-import { View, Text, StyleSheet, Image, ScrollView, ActivityIndicator } from "react-native";
+import { View, Text, StyleSheet, ScrollView, ActivityIndicator } from "react-native";
+import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { ThemedView } from "@/components/ThemedView";
 import { ThemedText } from "@/components/ThemedText";
@@ -112,7 +113,14 @@ export default function DetailScreen() {
         <ScrollView style={dynamicStyles.scrollContainer}>
           {/* 海报和基本信息 */}
           <View style={dynamicStyles.mobileTopContainer}>
-            <Image source={{ uri: detail.poster }} style={dynamicStyles.mobilePoster} />
+            <Image
+              source={{ uri: detail.poster }}
+              style={dynamicStyles.mobilePoster}
+              contentFit="cover"
+              transition={200}
+              recyclingKey={detail.poster}
+              accessibilityLabel={detail.title}
+            />
             <View style={dynamicStyles.mobileInfoContainer}>
               <View style={dynamicStyles.titleContainer}>
                 <ThemedText style={dynamicStyles.title} numberOfLines={2}>
@@ -195,7 +203,14 @@ export default function DetailScreen() {
       return (
         <ScrollView style={dynamicStyles.scrollContainer}>
           <View style={dynamicStyles.topContainer}>
-            <Image source={{ uri: detail.poster }} style={dynamicStyles.poster} />
+            <Image
+              source={{ uri: detail.poster }}
+              style={dynamicStyles.poster}
+              contentFit="cover"
+              transition={200}
+              recyclingKey={detail.poster}
+              accessibilityLabel={detail.title}
+            />
             <View style={dynamicStyles.infoContainer}>
               <View style={dynamicStyles.titleContainer}>
                 <ThemedText style={dynamicStyles.title} numberOfLines={1} ellipsizeMode="tail">

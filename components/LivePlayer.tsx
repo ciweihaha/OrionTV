@@ -7,16 +7,26 @@ interface LivePlayerProps {
   streamUrl: string | null;
   channelTitle?: string | null;
   onPlaybackStatusUpdate: (status: AVPlaybackStatus) => void;
+  /** V1.5：流加载失败/超时回调（每个 streamUrl 最多触发一次），供上层自动跳台 */
+  onPlaybackError?: () => void;
 }
 
 const PLAYBACK_TIMEOUT = 15000; // 15 seconds
 
-export default function LivePlayer({ streamUrl, channelTitle, onPlaybackStatusUpdate }: LivePlayerProps) {
+export default function LivePlayer({ streamUrl, channelTitle, onPlaybackStatusUpdate, onPlaybackError }: LivePlayerProps) {
   const video = useRef<Video>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isTimeout, setIsTimeout] = useState(false);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // V1.5：每个 streamUrl 只上报一次错误，避免上层重复跳台
+  const errorReportedForRef = useRef<string | null>(null);
   useKeepAwake();
+
+  const reportErrorOnce = (url: string | null) => {
+    if (!url || errorReportedForRef.current === url) return;
+    errorReportedForRef.current = url;
+    onPlaybackError?.();
+  };
 
   useEffect(() => {
     if (timeoutRef.current) {
@@ -29,6 +39,7 @@ export default function LivePlayer({ streamUrl, channelTitle, onPlaybackStatusUp
       timeoutRef.current = setTimeout(() => {
         setIsTimeout(true);
         setIsLoading(false);
+        reportErrorOnce(streamUrl); // V1.5：加载超时也算坏源，交由上层跳台
       }, PLAYBACK_TIMEOUT);
     } else {
       setIsLoading(false);
@@ -40,6 +51,8 @@ export default function LivePlayer({ streamUrl, channelTitle, onPlaybackStatusUp
         clearTimeout(timeoutRef.current);
       }
     };
+    // reportErrorOnce 仅读 ref 与 prop，语义上随 streamUrl 变化即可，无需入列（每次变化重置一次）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streamUrl]);
 
   const handlePlaybackStatusUpdate = (status: AVPlaybackStatus) => {
@@ -60,6 +73,7 @@ export default function LivePlayer({ streamUrl, channelTitle, onPlaybackStatusUp
         if (timeoutRef.current) {
           clearTimeout(timeoutRef.current);
         }
+        reportErrorOnce(streamUrl); // V1.5：播放错误交由上层跳台
       }
     }
     onPlaybackStatusUpdate(status);
@@ -95,6 +109,7 @@ export default function LivePlayer({ streamUrl, channelTitle, onPlaybackStatusUp
         onError={(e) => {
           setIsTimeout(true);
           setIsLoading(false);
+          reportErrorOnce(streamUrl); // V1.5：Video 组件级错误交由上层跳台
         }}
       />
       {isLoading && (
