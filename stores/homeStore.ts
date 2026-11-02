@@ -340,13 +340,29 @@ const useHomeStore = create<HomeState>((set, get) => ({
               aggPage: nextPg,
             });
           }
-          set((state) => ({
-            selectedCategory: updatedCategory,
-            contentData: [...state.contentData, ...newItems],
-            pageStart: state.pageStart + newItems.length,
-            aggPage: nextPg,
-            hasMore: nextHasMore,
-          }));
+          set((state) => {
+            // 2026-11-02 筛选/翻页去重：服务端改为按请求页码轮换上游站（筛选深分页的前提），
+            // 同一部影片可能在不同页由不同站返回（vod_id 前缀不同、片名相同），
+            // 追加时按片名去重，网格不再出现重复卡片。
+            const seen = new Set<string>();
+            for (const it of state.contentData) {
+              const k = String(it.title || "").trim().toLowerCase();
+              if (k) seen.add(k);
+            }
+            const deduped = newItems.filter((it) => {
+              const k = String(it.title || "").trim().toLowerCase();
+              if (!k || seen.has(k)) return false;
+              seen.add(k);
+              return true;
+            });
+            return {
+              selectedCategory: updatedCategory,
+              contentData: [...state.contentData, ...deduped],
+              pageStart: state.pageStart + deduped.length,
+              aggPage: nextPg,
+              hasMore: nextHasMore,
+            };
+          });
         }
       } else if (selectedCategory.type && selectedCategory.tag) {
         const result = await api.getDoubanData(
