@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { api, SearchResult, PlayRecord } from "@/services/api";
 import type { AggFilters, AggFilterGroup, AggVideoItem } from "@/services/api";
 import { EMPTY_AGG_FILTERS } from "@/services/api";
@@ -90,6 +91,56 @@ const getCmsFallbackTag = (category: Category): string => {
   }
 };
 
+// 2026-11-05 筛选重做：按 CMS 分类记忆筛选。
+// 记忆键是 cmsType（1 电影、2 电视剧、3 动漫、4 综艺），不是标题，
+// 避免标题改动导致记忆失效。存 AsyncStorage，不进缓存 key，
+// 不影响 agg 请求参数（仍是 6 维透传）。保存失败只吞错，
+// 不阻塞筛选本身——最坏情况是重启后记忆丢失，回到默认。
+export interface CmsFilterMemory {
+  filters: AggFilters;
+  filterOptions?: AggFilterGroup[];
+  filtersVisible?: boolean;
+}
+export type CmsFilterMemoryMap = Partial<Record<number, CmsFilterMemory>>;
+const FILTER_MEMORY_KEY = "oriontv:cmsFilterMemory:v1";
+const FILTER_KEYS: (keyof AggFilters)[] = ["cate", "area", "year", "lang", "score", "order"];
+const isValidCmsType = (v: unknown): v is 1 | 2 | 3 | 4 =>
+  v === 1 || v === 2 || v === 3 || v === 4;
+const sanitizeFilters = (v: unknown): AggFilters => {
+  const src = (v || {}) as Partial<AggFilters>;
+  const out = { ...EMPTY_AGG_FILTERS };
+  for (const k of FILTER_KEYS) {
+    if (typeof src[k] === "string") out[k] = src[k] as string;
+  }
+  return out;
+};
+const saveFilterMemory = (memory: CmsFilterMemoryMap): void => {
+  AsyncStorage.setItem(FILTER_MEMORY_KEY, JSON.stringify(memory)).catch(() => {
+    // 记忆丢失不是筛选失败，不抛错、不写 error 状态。
+  });
+};
+const loadFilterMemory = async (): Promise<CmsFilterMemoryMap> => {
+  try {
+    const raw = await AsyncStorage.getItem(FILTER_MEMORY_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const out: CmsFilterMemoryMap = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      const cmsType = Number(k);
+      if (!isValidCmsType(cmsType) || !v || typeof v !== "object") continue;
+      const entry = v as Partial<CmsFilterMemory>;
+      out[cmsType] = {
+        filters: sanitizeFilters(entry.filters),
+        filterOptions: Array.isArray(entry.filterOptions) ? entry.filterOptions : undefined,
+        filtersVisible: typeof entry.filtersVisible === "boolean" ? entry.filtersVisible : undefined,
+      };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+};
+
 // agg 项 -> RowItem（在 homeStore 做映射，不在 api.ts 混入 UI 类型）。
 // source 保留 "agg"：VideoCard 点进详情时走 title 搜索，
 // detailStore 已实测：preferredSource 失败/回 0 时会自动回落全量标题搜索，
@@ -155,6 +206,23 @@ interface HomeState {
   // index.tsx 的 effect 对 CMS 模式不重复触发（见 index.tsx 注释），避免一次筛选发两次请求。
   setAggFilters: (filters: Partial<AggFilters>) => Promise<void>;
   clearAggFilters: () => Promise<void>;
+  // 2026-11-05 筛选重做：待应用草稿。UI 点选项只改 pending，不发请求；
+  // 点“应用”时 applyPendingFilters 一次性把 pending 写成已应用并重查，
+  // 连选多组只发 1 次请求。pending 为 null 时 UI 应把它当成已应用值。
+  pendingFilters: AggFilters | null;
+  setPendingFilter: (key: keyof AggFilters, value: string) => void;
+  applyPendingFilters: () => Promise<void>;
+  discardPendingFilters: () => void;
+  // 单组清除：立即生效（点叉就是明确的清除动作，不是连选），
+  // 与组内点选项（只改草稿）语义分开，见 index.tsx 注释。
+  clearAggFilterGroup: (key: keyof AggFilters) => Promise<void>;
+  // 按 cmsType 记忆的筛选，见文件顶部 CmsFilterMemory 注释。
+  cmsFilterMemory: CmsFilterMemoryMap;
+  restoreFilterMemory: () => Promise<void>;
+  // 首屏 agg 失败才为 true：此时 UI 必须写“筛选服务不可用，已显示豆瓣内容”，
+  // 不能只写“已回落豆瓣”让用户以为还在筛 CMS。agg 成功后清零；
+  // 无筛选空列表回落不是服务失败，本字段保持 false。
+  filterServiceUnavailable: boolean;
   // 1.4.1 筛选栏可见性：纯 UI 状态，默认 false（隐藏），与筛选值、缓存 key、
   // 分页、回落逻辑完全无关。非 CMS 分类不渲染开关，故该值在非 CMS 下无意义；
   // 切换分类时由 selectCategory 重置为 false（点到新类目又是隐藏的）。
@@ -179,8 +247,12 @@ const useHomeStore = create<HomeState>((set, get) => ({
   aggPage: 0,
   hasMore: true,
   error: null,
-  // 1.4.1：进入任何分类时筛选栏默认隐藏，内容网格直接可见。
-  filtersVisible: false,
+  // 2026-11-05：CMS 分类默认展开筛选（不再默认隐藏）；非 CMS 分类
+  // 不渲染筛选开关，本值无意义。记忆恢复后以记忆的可见性为准。
+  filtersVisible: true,
+  pendingFilters: null,
+  cmsFilterMemory: {},
+  filterServiceUnavailable: false,
 
   fetchInitialData: async () => {
     const { apiBaseUrl } = useSettingsStore.getState();
@@ -285,6 +357,9 @@ const useHomeStore = create<HomeState>((set, get) => ({
           result = await api.getAggCategory(cmsType, nextPg, filters);
         } catch (aggError) {
           if (nextPg === 1) {
+            // 首屏 agg 失败：先记服务不可用，再回落豆瓣，UI 才能区分
+            // “服务挂了”与“无筛选空列表回落”两种情况。
+            set({ filterServiceUnavailable: true });
             await fallbackToDouban();
             return;
           }
@@ -302,6 +377,21 @@ const useHomeStore = create<HomeState>((set, get) => ({
         const updatedCategory: Category = result.filters
           ? { ...selectedCategory, filterOptions: result.filters, cmsFallback: false }
           : selectedCategory;
+        set({ filterServiceUnavailable: false });
+        // agg 成功即服务可用；filterOptions 写入时一并把记忆同步到
+        // 当前 CMS 分类（选项本身不进缓存 key，只进记忆，供切回时直接渲染）。
+        if (nextPg === 1) {
+          const mem = { ...(get().cmsFilterMemory || {}) };
+          if (selectedCategory.cmsType) {
+            mem[selectedCategory.cmsType] = {
+              filters: { ...(selectedCategory.filters || EMPTY_AGG_FILTERS) },
+              filterOptions: updatedCategory.filterOptions,
+              filtersVisible: get().filtersVisible,
+            };
+            saveFilterMemory(mem);
+            set({ cmsFilterMemory: mem });
+          }
+        }
         const nextHasMore = nextPg < result.pagecount;
 
         if (nextPg === 1) {
@@ -469,32 +559,54 @@ const useHomeStore = create<HomeState>((set, get) => ({
 
   selectCategory: (category: Category) => {
     const currentCategory = get().selectedCategory;
-    const cacheKey = getCacheKey(category);
-    // 切换判定加 cmsType 与 filters：CMS 分类切回豆瓣、或同一标题下筛选变化时，
-    // 不能只靠 title/tag 判断，否则会残留上一模式的状态。
-    const filtersChanged =
-      JSON.stringify(currentCategory.filters || null) !== JSON.stringify(category.filters || null);
+    // 2026-11-05：离开 CMS 分类前先保存它的记忆（筛选 + 选项 + 可见性），
+    // 进入目标分类时再恢复目标分类的记忆，不再用初始 EMPTY 覆盖。
+    // 记忆与 categories 列表分开存：categories 仍是初始列表，selectedCategory
+    // 才是带记忆的当前对象；切换判定仍用标题/tag/cmsType，不用 filters，
+    // 否则恢复后的 filters 与传入的 EMPTY 不等会误判为“筛选变化”而死循环。
+    const memoryBefore = { ...(get().cmsFilterMemory || {}) };
+    if (currentCategory.cmsType) {
+      memoryBefore[currentCategory.cmsType] = {
+        filters: { ...(currentCategory.filters || EMPTY_AGG_FILTERS) },
+        filterOptions: currentCategory.filterOptions,
+        filtersVisible: get().filtersVisible,
+      };
+    }
+    const targetMemory = category.cmsType ? memoryBefore[category.cmsType] : undefined;
+    const restoredCategory: Category = targetMemory
+      ? {
+          ...category,
+          filters: { ...targetMemory.filters },
+          filterOptions: targetMemory.filterOptions ?? category.filterOptions,
+          cmsFallback: false,
+        }
+      : category;
+    const targetVisible = targetMemory?.filtersVisible ?? (category.cmsType ? true : false);
+    const targetPending = restoredCategory.filters
+      ? { ...restoredCategory.filters }
+      : null;
 
-    if (currentCategory.title !== category.title || currentCategory.tag !== category.tag || currentCategory.cmsType !== category.cmsType || filtersChanged) {
-      // 切换分类即回到该分类的初始筛选（initialCategories 里的 EMPTY），
-      // 不把上一个 CMS 分类的筛选带到新分类；豆瓣分类本身不带 filters，天然清空。
-      // 1.4.1：切换分类同时重置筛选栏为隐藏——点到新类目时筛选又是隐藏的，
-      // 要点开关才出来；同分类重选（未进本分支）不重置，展开状态不受影响。
+    if (currentCategory.title !== category.title || currentCategory.tag !== category.tag || currentCategory.cmsType !== category.cmsType) {
       set({
-        selectedCategory: category,
+        cmsFilterMemory: memoryBefore,
+        selectedCategory: restoredCategory,
+        pendingFilters: targetPending,
         contentData: [],
         pageStart: 0,
         aggPage: 0,
         hasMore: true,
         error: null,
-        filtersVisible: false
+        filtersVisible: targetVisible,
+        filterServiceUnavailable: false,
       });
+      if (currentCategory.cmsType) saveFilterMemory(memoryBefore);
 
       if (category.type === 'record') {
         get().fetchInitialData();
         return;
       }
 
+      const cacheKey = getCacheKey(restoredCategory);
       const cachedData = dataCache.get(cacheKey);
       if (cachedData && isValidCache(cachedData)) {
         set({
@@ -505,7 +617,6 @@ const useHomeStore = create<HomeState>((set, get) => ({
           loading: false
         });
       } else {
-        // 删除过期缓存
         if (cachedData) {
           dataCache.delete(cacheKey);
         }
@@ -521,16 +632,27 @@ const useHomeStore = create<HomeState>((set, get) => ({
     if (JSON.stringify(merged) === JSON.stringify(cat.filters || EMPTY_AGG_FILTERS)) return;
     // CMS 与豆瓣 tag 互斥：选筛选即把 tag 置空，避免 tag + 筛选双重过滤。
     // 加载唯一入口就是这里的 fetchInitialData（index.tsx 对 CMS 模式不走 effect 重复加载）。
-    // 1.4.1：选筛选不改 filtersVisible——展开状态保持不变，可连选多组。
+    // 2026-11-05：本函数是“立即应用”入口，只由“应用”、单组清除、
+    // 全部清除调用；组内点选项只改 pending，不走这里，所以连选多组只发 1 次请求。
+    const memory = { ...(get().cmsFilterMemory || {}) };
+    memory[cat.cmsType] = {
+      filters: { ...merged },
+      filterOptions: cat.filterOptions,
+      filtersVisible: get().filtersVisible,
+    };
     set({
       selectedCategory: { ...cat, filters: merged, tag: undefined, cmsFallback: false },
+      pendingFilters: { ...merged },
+      cmsFilterMemory: memory,
       contentData: [],
       pageStart: 0,
       aggPage: 0,
       hasMore: true,
       error: null,
       loading: true,
+      filterServiceUnavailable: false,
     });
+    saveFilterMemory(memory);
     await get().fetchInitialData();
   },
 
@@ -538,16 +660,74 @@ const useHomeStore = create<HomeState>((set, get) => ({
     const cat = get().selectedCategory;
     if (!cat.cmsType) return;
     if (JSON.stringify(cat.filters || EMPTY_AGG_FILTERS) === JSON.stringify(EMPTY_AGG_FILTERS)) return;
+    const memory = { ...(get().cmsFilterMemory || {}) };
+    memory[cat.cmsType] = {
+      filters: { ...EMPTY_AGG_FILTERS },
+      filterOptions: cat.filterOptions,
+      filtersVisible: get().filtersVisible,
+    };
     set({
       selectedCategory: { ...cat, filters: { ...EMPTY_AGG_FILTERS }, tag: undefined, cmsFallback: false },
+      pendingFilters: { ...EMPTY_AGG_FILTERS },
+      cmsFilterMemory: memory,
       contentData: [],
       pageStart: 0,
       aggPage: 0,
       hasMore: true,
       error: null,
       loading: true,
+      filterServiceUnavailable: false,
     });
+    saveFilterMemory(memory);
     await get().fetchInitialData();
+  },
+
+  setPendingFilter: (key: keyof AggFilters, value: string) => {
+    const cat = get().selectedCategory;
+    if (!cat.cmsType) return;
+    const base = get().pendingFilters || cat.filters || EMPTY_AGG_FILTERS;
+    if (base[key] === value) return;
+    set({ pendingFilters: { ...base, [key]: value } });
+  },
+
+  applyPendingFilters: async () => {
+    const cat = get().selectedCategory;
+    if (!cat.cmsType) return;
+    const pending = get().pendingFilters;
+    if (!pending) return;
+    if (JSON.stringify(pending) === JSON.stringify(cat.filters || EMPTY_AGG_FILTERS)) return;
+    await get().setAggFilters({ ...pending });
+  },
+
+  discardPendingFilters: () => {
+    const cat = get().selectedCategory;
+    if (!cat.cmsType) return;
+    set({ pendingFilters: { ...(cat.filters || EMPTY_AGG_FILTERS) } });
+  },
+
+  clearAggFilterGroup: async (key: keyof AggFilters) => {
+    // 单组清除是明确动作，立即生效并重查 1 次；与组内点选项（只改草稿）
+    // 的语义分开，避免“点叉后还要再点应用”这种反直觉。
+    await get().setAggFilters({ [key]: "" } as Partial<AggFilters>);
+  },
+
+  restoreFilterMemory: async () => {
+    const memory = await loadFilterMemory();
+    if (Object.keys(memory).length === 0) return;
+    const cat = get().selectedCategory;
+    const next: Record<string, unknown> = { cmsFilterMemory: memory };
+    if (cat.cmsType && memory[cat.cmsType]) {
+      const m = memory[cat.cmsType]!;
+      next.selectedCategory = {
+        ...cat,
+        filters: { ...m.filters },
+        filterOptions: m.filterOptions ?? cat.filterOptions,
+        cmsFallback: false,
+      };
+      next.pendingFilters = { ...m.filters };
+      if (typeof m.filtersVisible === "boolean") next.filtersVisible = m.filtersVisible;
+    }
+    set(next as never);
   },
 
   // 1.4.1 筛选栏开关：只改 filtersVisible，不触发任何加载、不改筛选值、
@@ -555,12 +735,37 @@ const useHomeStore = create<HomeState>((set, get) => ({
   // 开关本身始终挂载，是收起后的焦点落点；筛选值选择、重置均不调用本函数，
   // 故选完不自动收起。非 CMS 分类下调用亦无害（index.tsx 不渲染开关）。
   toggleFilters: () => {
-    set((state) => ({ filtersVisible: !state.filtersVisible }));
+    const next = !get().filtersVisible;
+    const cat = get().selectedCategory;
+    if (cat.cmsType) {
+      const memory = { ...(get().cmsFilterMemory || {}) };
+      memory[cat.cmsType] = {
+        filters: { ...(cat.filters || EMPTY_AGG_FILTERS) },
+        filterOptions: cat.filterOptions,
+        filtersVisible: next,
+      };
+      set({ filtersVisible: next, cmsFilterMemory: memory });
+      saveFilterMemory(memory);
+    } else {
+      set({ filtersVisible: next });
+    }
   },
 
   setFiltersVisible: (visible: boolean) => {
     if (get().filtersVisible === visible) return;
-    set({ filtersVisible: visible });
+    const cat = get().selectedCategory;
+    if (cat.cmsType) {
+      const memory = { ...(get().cmsFilterMemory || {}) };
+      memory[cat.cmsType] = {
+        filters: { ...(cat.filters || EMPTY_AGG_FILTERS) },
+        filterOptions: cat.filterOptions,
+        filtersVisible: visible,
+      };
+      set({ filtersVisible: visible, cmsFilterMemory: memory });
+      saveFilterMemory(memory);
+    } else {
+      set({ filtersVisible: visible });
+    }
   },
 
   refreshPlayRecords: async () => {
