@@ -127,3 +127,61 @@ describe("getResolutionFromM3U8 / readTextWithLimit（深查第 2 轮：OTV-3 �
     expect(cancel).toHaveBeenCalled();
   });
 });
+
+describe("getResolutionFromM3U8（深查第 4 轮：带查询串/片段的 m3u8 地址被跳过）", () => {
+  let fetchMock: jest.Mock;
+
+  beforeEach(() => {
+    fetchMock = jest.fn();
+    (global as any).fetch = fetchMock;
+  });
+
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("⑥ 带查询串的 m3u8 地址（如防盗链 token）应探测分辨率，且 fetch 用完整原始地址", async () => {
+    fetchMock.mockResolvedValue(noReaderResponse(HEADER));
+
+    const result = await getResolutionFromM3U8(
+      "https://example.test/x.m3u8?token=abc123&expires=1893456000",
+    );
+
+    expect(result).toBe("1080p");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://example.test/x.m3u8?token=abc123&expires=1893456000",
+    );
+  });
+
+  it("⑦ 带片段的 m3u8 地址应探测分辨率", async () => {
+    fetchMock.mockResolvedValue(noReaderResponse(HEADER));
+
+    const result = await getResolutionFromM3U8("https://example.test/x.m3u8#frag");
+
+    expect(result).toBe("1080p");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("⑧ 查询串里含 .m3u8 但路径是 .mp4 的地址仍应跳过、不发起请求", async () => {
+    const result = await getResolutionFromM3U8("https://example.test/x.mp4?u=y.m3u8");
+
+    expect(result).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("⑨ 大写后缀 + 查询串应探测分辨率", async () => {
+    fetchMock.mockResolvedValue(noReaderResponse(HEADER));
+
+    const result = await getResolutionFromM3U8("https://example.test/X.M3U8?token=1");
+
+    expect(result).toBe("1080p");
+  });
+
+  it("⑩ 回归：普通 .mp4 地址仍跳过、不发起请求", async () => {
+    const result = await getResolutionFromM3U8("https://example.test/x.mp4");
+
+    expect(result).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
