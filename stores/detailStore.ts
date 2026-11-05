@@ -64,38 +64,24 @@ const useDetailStore = create<DetailState>((set, get) => ({
 
     const { videoSource } = useSettingsStore.getState();
 
-    const processAndSetResults = async (results: SearchResult[], merge = false) => {
-      const resolutionStart = performance.now();
-      logger.info(`[PERF] Resolution detection START - processing ${results.length} sources`);
-      
-      const resultsWithResolution = await Promise.all(
-        results.map(async (searchResult) => {
-          let resolution;
-          const m3u8Start = performance.now();
-          try {
-            if (searchResult.episodes && searchResult.episodes.length > 0) {
-              resolution = await getResolutionFromM3U8(searchResult.episodes[0], signal);
-            }
-          } catch (e) {
-            if ((e as Error).name !== "AbortError") {
-              logger.info(`Failed to get resolution for ${searchResult.source_name}`, e);
-            }
-          }
-          const m3u8End = performance.now();
-          logger.info(`[PERF] M3U8 resolution for ${searchResult.source_name}: ${(m3u8End - m3u8Start).toFixed(2)}ms (${resolution || 'failed'})`);
-          return { ...searchResult, resolution };
-        })
-      );
-      
-      const resolutionEnd = performance.now();
-      logger.info(`[PERF] Resolution detection COMPLETE - took ${(resolutionEnd - resolutionStart).toFixed(2)}ms`);
-
+    // 点播提速第 2 轮：分辨率探测不再卡首屏。
+    // 旧逻辑：processAndSetResults 内对本批每个源 Promise.all 拉取首集 m3u8
+    // （第三方 CMS 直连，默认 10s 超时），全部探完才 set()——首个可播源明明
+    // 已回包，详情页仍要等最慢的那条 m3u8 才能出首帧。新逻辑分两段：
+    // ① 同步 set() 立即上屏（resolution 为空，不带画质徽标）；
+    // ② 后台逐源探分辨率，探到一个补一个（patch searchResults/sources/detail
+    //     上同 source 的项），失败/取消静默跳过。画质徽标晚到几秒可接受，
+    //     首帧晚到 10 秒不可接受。调用方不再 await 本函数——await 只会等
+    //     后台探测，等同于把旧阻塞搬回来。
+    const processAndSetResults = (results: SearchResult[], merge = false) => {
       if (signal.aborted) return;
 
       set((state) => {
         const existingSources = new Set(state.searchResults.map((r) => r.source));
-        const newResults = resultsWithResolution.filter((r) => !existingSources.has(r.source));
-        const finalResults = merge ? [...state.searchResults, ...newResults] : resultsWithResolution;
+        const newResults = results
+          .filter((r) => !existingSources.has(r.source))
+          .map((r) => ({ ...r, resolution: undefined }) as SearchResultWithResolution);
+        const finalResults = merge ? [...state.searchResults, ...newResults] : newResults;
 
         return {
           searchResults: finalResults,
@@ -106,6 +92,37 @@ const useDetailStore = create<DetailState>((set, get) => ({
           })),
           detail: state.detail ?? finalResults[0] ?? null,
         };
+      });
+
+      // 后台补分辨率：不阻塞、不抛错、取消后不 patch。
+      void Promise.all(
+        results.map(async (searchResult) => {
+          let resolution: string | null = null;
+          try {
+            if (searchResult.episodes && searchResult.episodes.length > 0) {
+              resolution = await getResolutionFromM3U8(searchResult.episodes[0], signal);
+            }
+          } catch (e) {
+            if ((e as Error).name !== "AbortError") {
+              logger.info(`Failed to get resolution for ${searchResult.source_name}`, e);
+            }
+          }
+          if (signal.aborted || !resolution) return;
+          set((state) => ({
+            searchResults: state.searchResults.map((r) =>
+              r.source === searchResult.source ? { ...r, resolution } : r,
+            ),
+            sources: state.sources.map((s) =>
+              s.source === searchResult.source ? { ...s, resolution } : s,
+            ),
+            detail:
+              state.detail && state.detail.source === searchResult.source
+                ? { ...state.detail, resolution }
+                : state.detail,
+          }));
+        }),
+      ).catch(() => {
+        // Promise.all 本身不 reject（内层已 try/catch），此处仅防意外未处理拒绝。
       });
     };
 
@@ -134,7 +151,7 @@ const useDetailStore = create<DetailState>((set, get) => ({
         // 检查preferred source结果
         if (preferredResult.length > 0) {
           logger.info(`[SUCCESS] Preferred source "${preferredSource}" found ${preferredResult.length} results for "${q}"`);
-          await processAndSetResults(preferredResult, false);
+          processAndSetResults(preferredResult, false);
           set({ loading: false });
         } else {
           // 降级策略：preferred source失败时立即尝试所有源
@@ -158,7 +175,7 @@ const useDetailStore = create<DetailState>((set, get) => ({
             
             if (filteredResults.length > 0) {
               logger.info(`[SUCCESS] FALLBACK search found results, proceeding with ${filteredResults[0].source_name}`);
-              await processAndSetResults(filteredResults, false);
+              processAndSetResults(filteredResults, false);
               set({ loading: false });
             } else {
               logger.error(`[ERROR] FALLBACK search found no matching results for "${q}"`);
@@ -188,7 +205,7 @@ const useDetailStore = create<DetailState>((set, get) => ({
             logger.info(`[PERF] API searchVideos (background) END - took ${(searchAllEnd - searchAllStart).toFixed(2)}ms, results: ${allResults.length}`);
             
             if (signal.aborted) return;
-            await processAndSetResults(allResults.filter(item => item.title === q), true);
+            processAndSetResults(allResults.filter(item => item.title === q), true);
           } catch (backgroundError) {
             logger.warn(`[WARN] Background search failed, but preferred source already succeeded:`, backgroundError);
           }
@@ -219,7 +236,17 @@ const useDetailStore = create<DetailState>((set, get) => ({
             return;
           }
 
+          // 点播提速第 2 轮：慢源宽限。旧逻辑 await Promise.all(searchPromises)，
+          // 全部源（含 15s 超时挂起的死源）都结算才算完，allSourcesLoaded 被
+          // 最慢的源拖住；用户明明已看到首个可播源，源列表仍长时间转圈。
+          // 新逻辑：首个结果到达后最多再等 8 秒（SEARCH_GRACE_AFTER_FIRST_MS），
+          // 到点即继续走完 init（finally 置 allSourcesLoaded），迟到的源不取消、
+          // 仍由各自的 processAndSetResults 陆续并入列表。无结果时不宽限——
+          // 0 结果 + 未结算完绝不等同于“没找到”，继续等全部结算再报无结果。
+          const SEARCH_GRACE_AFTER_FIRST_MS = 8000;
           let firstResultFound = false;
+          let firstResultAt = 0;
+          let settledCount = 0;
           let totalResults = 0;
           const searchPromises = enabledResources.map(async (resource) => {
             try {
@@ -227,14 +254,15 @@ const useDetailStore = create<DetailState>((set, get) => ({
               const { results } = await api.searchVideo(q, resource.key, signal);
               const searchEnd = performance.now();
               logger.info(`[PERF] API searchVideo (${resource.name}) took ${(searchEnd - searchStart).toFixed(2)}ms, results: ${results.length}`);
-              
+
               if (results.length > 0) {
                 totalResults += results.length;
                 logger.info(`[SUCCESS] Source "${resource.name}" found ${results.length} results for "${q}"`);
-                await processAndSetResults(results, true);
+                processAndSetResults(results, true);
                 if (!firstResultFound) {
                   set({ loading: false }); // Stop loading indicator on first result
                   firstResultFound = true;
+                  firstResultAt = Date.now();
                   logger.info(`[SUCCESS] First result found from "${resource.name}", stopping loading indicator`);
                 }
               } else {
@@ -242,10 +270,20 @@ const useDetailStore = create<DetailState>((set, get) => ({
               }
             } catch (error) {
               logger.error(`[ERROR] Failed to fetch from ${resource.name}:`, error);
+            } finally {
+              settledCount += 1;
             }
           });
 
-          await Promise.all(searchPromises);
+          const grace = (async () => {
+            for (;;) {
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              if (signal.aborted) return;
+              if (settledCount >= enabledResources.length) return;
+              if (firstResultAt > 0 && Date.now() - firstResultAt >= SEARCH_GRACE_AFTER_FIRST_MS) return;
+            }
+          })();
+          await Promise.race([Promise.all(searchPromises), grace]);
           
           // 检查是否找到任何结果
           if (totalResults === 0) {
