@@ -146,7 +146,9 @@ class UpdateService {
   /** --------------------------------------------------------------
    *  3️⃣ 下载 APK（使用 expo-file-system 的下载 API）
    *  安全：下载完成后校验 SHA256（从 <url>.sha256 获取期望值）。
-   *  发布流程必须在 GitHub Release 中附带 .sha256 文件。
+   *  发布流程必须在 R2 下载地址同目录附带 .sha256 文件
+   *  （下载地址见 constants/UpdateConfig.ts 的 getDownloadUrl：
+   *  https://dl.ciweihaha.win/orionTV.<version>.apk，不再是 GitHub Release 附件）。
    * --------------------------------------------------------------- */
   async downloadApk(
     url: string,
@@ -243,9 +245,10 @@ class UpdateService {
 
   /**
    * 校验下载的 APK 的 SHA256。
-   * 期望值从 `${downloadUrl}.sha256` 获取（GitHub Release 附件）。
+   * 期望值从 `${downloadUrl}.sha256` 获取（与 APK 同一 R2 下载地址，
+   *   见 constants/UpdateConfig.ts 的 getDownloadUrl，不再是 GitHub Release 附件）。
    * - 期望值拉取失败 / 格式无效 / 与实际哈希不一致：全部抛错并由调用方删除文件（fail-closed），
-   *   绝不降级安装。发布流程必须在 GitHub Release 中附带 .sha256 文件。
+   *   绝不降级安装。发布流程必须在 R2 下载地址同目录附带 .sha256 文件。
    */
   private async verifyApkSha256(fileUri: string, downloadUrl: string): Promise<void> {
     let expected = "";
