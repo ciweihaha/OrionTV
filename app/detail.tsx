@@ -112,8 +112,6 @@ export default function DetailScreen() {
     // *.doubanio.com 走 MoonTV image-proxy（豆瓣防盗链），其余图床
     // （如 p.lztutu.com，代理白名单会 403）直接回落原图，见 services/api.ts。
     // 因此这里不是“全部走代理”，而是“适用才代理、否则原图”。
-    // cacheKey 与最终加载 URL 完全一致，不剥离任何 query 参数：
-    // 未证实任一参数为纯追踪参数，query 也可能承载尺寸/格式等影响图片内容的信息。
     const posterUrl = api.getImageProxyUrl(detail.poster);
     if (deviceType === 'mobile') {
       // 移动端垂直布局
@@ -127,7 +125,6 @@ export default function DetailScreen() {
               contentFit="cover"
               transition={200}
               cachePolicy="memory-disk"
-              cacheKey={posterUrl}
               recyclingKey={detail.poster}
               accessibilityLabel={detail.title}
             />
@@ -219,7 +216,6 @@ export default function DetailScreen() {
               contentFit="cover"
               transition={200}
               cachePolicy="memory-disk"
-              cacheKey={posterUrl}
               recyclingKey={detail.poster}
               accessibilityLabel={detail.title}
             />
