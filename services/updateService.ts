@@ -474,20 +474,33 @@ class UpdateService {
    *  5️⃣ 版本比对工具（支持 -beta / -rc 等后缀）
    * --------------------------------------------------------------- */
   compareVersions(v1: string, v2: string): number {
-    // 剥离后缀（如 1.3.14-beta → 1.3.14），只比较数字部分
-    const normalize = (v: string) => v.split('-')[0].split('.').map(s => {
-      const n = parseInt(s, 10);
-      return isNaN(n) ? 0 : n;
-    });
-    const p1 = normalize(v1);
-    const p2 = normalize(v2);
-    for (let i = 0; i < Math.max(p1.length, p2.length); i++) {
-      const n1 = p1[i] ?? 0;
-      const n2 = p2[i] ?? 0;
+    // 深查第 1 轮：旧实现剥离后缀后只比数字，导致 1.5.0-beta 与 1.5.0 判相等，
+    // 已装 beta 的用户收不到正式版更新（isUpdateAvailable 要求 >0）。
+    // 新规则：先比数字段；数字相等时，无后缀（正式版）> 有后缀（预发布），
+    // 两者都有后缀时按后缀字符串比较（beta < rc，符合常见预发布顺序）。
+    // 注意：这只是简化 semver 预发布比较，不解析点分预发布标识的数字/字符优先级。
+    const split = (v: string) => {
+      const dash = v.indexOf('-');
+      const core = dash >= 0 ? v.slice(0, dash) : v;
+      const suffix = dash >= 0 ? v.slice(dash + 1) : '';
+      const nums = core.split('.').map(s => {
+        const n = parseInt(s, 10);
+        return isNaN(n) ? 0 : n;
+      });
+      return { nums, suffix };
+    };
+    const p1 = split(v1);
+    const p2 = split(v2);
+    for (let i = 0; i < Math.max(p1.nums.length, p2.nums.length); i++) {
+      const n1 = p1.nums[i] ?? 0;
+      const n2 = p2.nums[i] ?? 0;
       if (n1 > n2) return 1;
       if (n1 < n2) return -1;
     }
-    return 0;
+    if (p1.suffix === p2.suffix) return 0;
+    if (p1.suffix === '') return 1;
+    if (p2.suffix === '') return -1;
+    return p1.suffix < p2.suffix ? -1 : 1;
   }
   getCurrentVersion(): string {
     return currentVersion;
