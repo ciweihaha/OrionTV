@@ -47,7 +47,15 @@ export const getResolutionFromM3U8 = async (
     return cachedEntry.resolution;
   }
 
-  if (!url.toLowerCase().endsWith(".m3u8")) {
+  // 深查第 4 轮：先剥查询串与片段再判后缀。旧实现对整串 endsWith(".m3u8")，
+  // 两向都错：① 带查询串/片段的真 m3u8 地址（如 ?token=… 防盗链签名，
+  // CMS 回源的常见形态）被静默跳过，分辨率徽标缺失、detailStore 的按分辨率
+  // 选源排序也随之失效；② 查询串尾部恰好是 .m3u8 的非 m3u8 地址
+  // （如 x.mp4?u=y.m3u8）反被误判、空发一次请求。按 RFC 3986，查询串始于
+  // 首个 ?、片段始于首个 #，路径部分即首个 ?/# 之前；只剥这两段再判后缀，
+  // 不用 includes，避免②类误判。fetch 与缓存键仍用完整原始 URL（token 须带上）。
+  const pathPart = url.split(/[?#]/, 1)[0];
+  if (!pathPart.toLowerCase().endsWith(".m3u8")) {
     logger.info(`[PERF] M3U8 resolution detection SKIPPED - not M3U8 file`);
     return null;
   }
