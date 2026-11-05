@@ -1,4 +1,5 @@
 import Logger from '@/utils/Logger';
+import { utf8ByteLength } from '../utils/utf8ByteLength';
 
 const logger = Logger.withTag('M3U8');
 
@@ -113,13 +114,24 @@ export const getResolutionFromM3U8 = async (
 
 /**
  * 流式读取响应体文本，超限返回 null（R13）
+ * 深查第 2 轮（OTV-3 补漏）：与 api.ts / services/m3u.ts 的同名函数同步——
+ * 无流分支此前用 text.length（UTF-16 码元数）判断，中文按 1 字节/字计，
+ * 同样 1MB 上限可放行近 3MB 的中文播放列表；RN 真机上响应通常没有
+ * body.getReader，该分支是主路径而非“通常不会发生”。改为共享工具
+ * utf8ByteLength 按 UTF-8 字节判断，并移植 Content-Length 预检，
+ * 诚实偏大的声明在读体前即返回 null。
  */
 const readTextWithLimit = async (response: Response, maxBytes: number): Promise<string | null> => {
+  // Content-Length 预检：与 api.ts / m3u.ts 的 early reject 一致，缺失或谎报的声明
+  // 仍由后续字节校验兜底。
+  const declared = Number(response.headers?.get?.('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    return null;
+  }
   const reader = response.body?.getReader();
   if (!reader) {
-    // 无 body 流时回退（通常不会发生）
     const text = await response.text();
-    return text.length <= maxBytes ? text : null;
+    return utf8ByteLength(text) <= maxBytes ? text : null;
   }
   const decoder = new TextDecoder();
   let totalBytes = 0;
