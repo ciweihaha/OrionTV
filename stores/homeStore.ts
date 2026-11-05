@@ -255,14 +255,19 @@ const useHomeStore = create<HomeState>((set, get) => ({
   filterServiceUnavailable: false,
 
   fetchInitialData: async () => {
-    const { apiBaseUrl } = useSettingsStore.getState();
-    await useAuthStore.getState().checkLoginStatus(apiBaseUrl);
-
     const { selectedCategory } = get();
     const cacheKey = getCacheKey(selectedCategory);
 
+    // 2026-11-05 点播提速：缓存命中先返回，不再先等登录检查。
+    // 旧顺序每次 fetchInitialData 都先 await checkLoginStatus（读 AsyncStorage、
+    // 必要时拉服务器配置），缓存命中本应立即渲染，却被这段前置等待拖住。
+    // 新顺序：缓存命中直接返回——与 selectCategory 的缓存快路径一致（该路径本就
+    // 不走登录检查），且 agg/豆瓣内容本身不需要登录；最近播放不走缓存，仍保持
+    // 原有登录检查在前；缓存未命中时登录检查仍在发请求之前，行为不变。
     // 最近播放不缓存，始终实时获取
     if (selectedCategory.type === 'record') {
+      const { apiBaseUrl } = useSettingsStore.getState();
+      await useAuthStore.getState().checkLoginStatus(apiBaseUrl);
       set({ loading: true, contentData: [], pageStart: 0, aggPage: 0, hasMore: true, error: null });
       await get().loadMoreData();
       return;
@@ -282,6 +287,8 @@ const useHomeStore = create<HomeState>((set, get) => ({
       return;
     }
 
+    const { apiBaseUrl } = useSettingsStore.getState();
+    await useAuthStore.getState().checkLoginStatus(apiBaseUrl);
     set({ loading: true, contentData: [], pageStart: 0, aggPage: 0, hasMore: true, error: null });
     await get().loadMoreData();
   },
