@@ -149,6 +149,10 @@ const VideoCard = forwardRef<View, VideoCardProps>(
     // 是否是继续观看的视频
     const isContinueWatching = progress !== undefined && progress > 0 && progress < 1;
 
+    // cacheKey 与最终加载 URL 完全一致，不剥离任何 query 参数：
+    // 未证实任一参数为纯追踪参数，query 也可能承载尺寸/格式等影响图片内容的信息。
+    const posterUrl = api.getImageProxyUrl(poster);
+
     return (
       <Animated.View style={[styles.wrapper, animatedStyle, { opacity: fadeAnim }]}>
         <Pressable
@@ -168,10 +172,12 @@ const VideoCard = forwardRef<View, VideoCardProps>(
         >
           <View style={styles.card}>
             <Image
-              source={{ uri: api.getImageProxyUrl(poster) }}
+              source={{ uri: posterUrl }}
               style={styles.poster}
               contentFit="cover"
               transition={200}
+              cachePolicy="memory-disk"
+              cacheKey={posterUrl}
               recyclingKey={poster}
               placeholder={null}
               accessibilityLabel={title}
