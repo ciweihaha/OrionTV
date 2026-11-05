@@ -1,5 +1,5 @@
 import { getResolutionFromM3U8 } from "../m3u8";
-import { utf8ByteLength } from "../utils/utf8ByteLength";
+import { utf8ByteLength } from "../../utils/utf8ByteLength";
 
 jest.mock("@/utils/Logger", () => ({
   __esModule: true,

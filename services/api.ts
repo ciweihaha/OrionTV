@@ -154,6 +154,67 @@ export class API {
   private static readonly BODY_TIMEOUT_BREAKER_WINDOW_MS = 60_000;
   private bodyTimeoutBreaker = new Map<string, { consecutive: number; blockedUntil: number }>();
 
+  // 点播提速第 2 轮（2026-11-05）：搜索结果内存缓存。
+  // 同一片名在一次“搜 → 进详情”流程里常被请求 2–3 次（搜索页 1 次聚合搜索；
+  // 详情页首选源 1 次、后台全量 1 次），每次都是全量聚合搜索。2 分钟内同一
+  // 归一化关键词直接复用，不再发请求；在途同 key 请求去重为同一 Promise；
+  // 错误不缓存。TTL 短是刻意的：剧集源/集数会变，缓存只省重复不省新鲜。
+  private static readonly SEARCH_CACHE_TTL_MS = 2 * 60 * 1000;
+  private static readonly SEARCH_CACHE_MAX_ENTRIES = 50;
+  // 资源列表极少变化，却是详情页标准路径的串行前置请求（每次进详情先拉一次
+  // 才开始逐源搜索）：缓存 10 分钟 + 在途去重。
+  private static readonly RESOURCES_CACHE_TTL_MS = 10 * 60 * 1000;
+  private searchCache = new Map<string, { results: SearchResult[]; timestamp: number }>();
+  private searchInflight = new Map<string, Promise<SearchResult[]>>();
+  private resourcesCache: { data: ApiSite[]; timestamp: number } | null = null;
+  private resourcesInflight: Promise<ApiSite[]> | null = null;
+
+  private normalizeSearchQuery(q: string): string {
+    return q.trim().toLowerCase().replace(/\s+/g, "");
+  }
+
+  private searchCacheGet(key: string): SearchResult[] | null {
+    const hit = this.searchCache.get(key);
+    if (!hit) return null;
+    if (Date.now() - hit.timestamp >= API.SEARCH_CACHE_TTL_MS) {
+      this.searchCache.delete(key);
+      return null;
+    }
+    return [...hit.results];
+  }
+
+  private searchCacheSet(key: string, results: SearchResult[]): void {
+    if (this.searchCache.size >= API.SEARCH_CACHE_MAX_ENTRIES) {
+      const oldestKey = this.searchCache.keys().next().value;
+      if (oldestKey !== undefined) this.searchCache.delete(oldestKey);
+    }
+    this.searchCache.set(key, { results: [...results], timestamp: Date.now() });
+  }
+
+  /** 缓存命中直接返回；在途同 key 去重；失败不缓存、不留脏 in-flight。 */
+  private fetchSearchCached(
+    key: string,
+    fetcher: () => Promise<SearchResult[]>,
+  ): Promise<SearchResult[]> {
+    const hit = this.searchCacheGet(key);
+    if (hit) return Promise.resolve(hit);
+    const inflight = this.searchInflight.get(key);
+    if (inflight) return inflight;
+    const p = fetcher().then(
+      (results) => {
+        this.searchCacheSet(key, results);
+        if (this.searchInflight.get(key) === p) this.searchInflight.delete(key);
+        return [...results];
+      },
+      (error) => {
+        if (this.searchInflight.get(key) === p) this.searchInflight.delete(key);
+        throw error;
+      },
+    );
+    this.searchInflight.set(key, p);
+    return p;
+  }
+
   constructor(baseURL?: string) {
     if (baseURL) {
       this.baseURL = baseURL;
@@ -587,6 +648,12 @@ export class API {
    * 「无法连接服务器」。增加重试：超时/网络错误/5xx 自动重试至多 2 次
    * （退避 1s），实测链路单次成功率约 80%，3 次尝试后失败率 <1%。
    * 仅 GET 幂等请求，重试安全；4xx 属请求自身问题，不重试直接抛错。
+   *
+   * 点播提速第 2 轮（2026-11-05）：重试加总预算 30 秒。旧逻辑单次尝试最坏
+   * 15s（响应头超时）+ 15s（体读取超时）= 30s，3 次尝试 + 2 次退避最坏约 92s
+   * 才回落豆瓣，用户看到的是近一分半的白屏/转圈。总预算内每次尝试的超时取
+   * min(15s, 剩余预算），预算耗尽即停、不再开新尝试；成功率口径不变
+   * （3 次尝试内能成的仍能成，只是极端拖尾不再无限续）。
    */
   async getAggCategory(
     t: 1 | 2 | 3 | 4,
@@ -601,13 +668,21 @@ export class API {
       if (value) parts.push(`${key}=${encodeURIComponent(value)}`);
     });
     const url = `${AGG_BASE_URL}?${parts.join("&")}`;
+    const TOTAL_BUDGET_MS = 30_000;
+    const budgetStart = Date.now();
     let lastError: unknown = null;
     for (let attempt = 0; attempt < 3; attempt++) {
+      const remainingMs = TOTAL_BUDGET_MS - (Date.now() - budgetStart);
+      if (remainingMs <= 0) break;
       if (attempt > 0) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1000, remainingMs)));
       }
+      const attemptRemainingMs = TOTAL_BUDGET_MS - (Date.now() - budgetStart);
+      if (attemptRemainingMs <= 0) break;
+      // 本次尝试的超时：响应头超时与体读取超时共用同一预算余量。
+      const attemptTimeoutMs = Math.min(API.DEFAULT_TIMEOUT, attemptRemainingMs);
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), API.DEFAULT_TIMEOUT);
+      const timeoutId = setTimeout(() => controller.abort(), attemptTimeoutMs);
       try {
         const response = await fetch(url, {
           signal: controller.signal,
@@ -623,7 +698,7 @@ export class API {
         }
         const data: AggCategoryResponse = await this.readJsonLimited(
           response,
-          API.DEFAULT_TIMEOUT,
+          attemptTimeoutMs,
           undefined,
           "agg",
         );
@@ -644,29 +719,60 @@ export class API {
   }
 
   async searchVideos(query: string): Promise<{ results: SearchResult[] }> {
-    const url = `/api/search?q=${encodeURIComponent(query)}`;
-    const response = await this._fetch(url);
-    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "search");
+    // 点播提速第 2 轮：同一片名 2 分钟内复用缓存（搜索页 → 详情页后台全量
+    // 是同一 key 的重复请求），见文件顶部 SEARCH_CACHE_TTL_MS 注释。
+    const key = `all:${this.normalizeSearchQuery(query)}`;
+    const results = await this.fetchSearchCached(key, async () => {
+      const url = `/api/search?q=${encodeURIComponent(query)}`;
+      const response = await this._fetch(url);
+      const data = await this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "search");
+      return data.results as SearchResult[];
+    });
+    return { results };
   }
 
   async searchVideo(query: string, resourceId: string, signal?: AbortSignal): Promise<{ results: SearchResult[] }> {
-    const url = `/api/search/one?q=${encodeURIComponent(query)}&resourceId=${encodeURIComponent(resourceId)}`;
-    const response = await this._fetch(url, { signal });
-    const { results } = await this.readJsonLimited(response, API.DEFAULT_TIMEOUT, signal, "search");
+    // 点播提速第 2 轮：按源缓存原始结果，模糊过滤每次现算（过滤是纯函数，
+    // 与缓存正交）；同一源 + 同一片名在详情页重进/后台补搜时不再发请求。
+    // 注意：在途去重会共享第一个调用者的 signal 结果——调用方已取消时仍可能
+    // 拿到共享的成功结果而非 AbortError，属缓存复用的已知取舍（数据本身已到）。
+    const key = `one:${resourceId}:${this.normalizeSearchQuery(query)}`;
+    const raw = await this.fetchSearchCached(key, async () => {
+      const url = `/api/search/one?q=${encodeURIComponent(query)}&resourceId=${encodeURIComponent(resourceId)}`;
+      const response = await this._fetch(url, { signal });
+      const { results } = await this.readJsonLimited(response, API.DEFAULT_TIMEOUT, signal, "search");
+      return results as SearchResult[];
+    });
     // 模糊匹配：归一化后比较（去空格、转小写），避免标题多一个符号就丢结果
     const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, "");
     const normalizedQuery = normalize(query);
     return {
-      results: (results as SearchResult[]).filter((item: SearchResult) =>
+      results: raw.filter((item: SearchResult) =>
         item.title && normalize(item.title).includes(normalizedQuery)
       ),
     };
   }
 
   async getResources(signal?: AbortSignal): Promise<ApiSite[]> {
-    const url = `/api/search/resources`;
-    const response = await this._fetch(url, { signal });
-    return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, signal, "resources");
+    // 点播提速第 2 轮：资源列表 10 分钟缓存 + 在途去重。详情页标准路径每次
+    // 进详情都先串行拉一次才开始逐源搜索，列表本身极少变化。
+    if (this.resourcesCache && Date.now() - this.resourcesCache.timestamp < API.RESOURCES_CACHE_TTL_MS) {
+      return [...this.resourcesCache.data];
+    }
+    if (this.resourcesInflight) return this.resourcesInflight;
+    const p: Promise<ApiSite[]> = (async () => {
+      const url = `/api/search/resources`;
+      const response = await this._fetch(url, { signal });
+      const data = await this.readJsonLimited(response, API.DEFAULT_TIMEOUT, signal, "resources");
+      this.resourcesCache = { data: data as ApiSite[], timestamp: Date.now() };
+      return [...(data as ApiSite[])];
+    })();
+    this.resourcesInflight = p;
+    try {
+      return await p;
+    } finally {
+      if (this.resourcesInflight === p) this.resourcesInflight = null;
+    }
   }
 
   async getVideoDetail(source: string, id: string): Promise<VideoDetail> {
