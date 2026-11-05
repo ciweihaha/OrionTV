@@ -699,7 +699,12 @@ export default function HomeScreen() {
       {/* CMS 筛选栏：展开时渲染，分层——第一层只放类型、年份、地区、
           排序 4 组快捷项，语言、评分收进“更多筛选”。组内点选项只改草稿，
           点“应用”才发 1 次请求；选值、重置均不自动收起。选项未到时
-          显示骨架而不是空栏；agg 失败时明确写服务不可用，不静默回落。 */}
+          显示骨架而不是空栏；agg 失败时明确写服务不可用，不静默回落。
+          2026-11-05 第 2 轮：面板顺序改为 快捷层 → 更多开关 → 更多层 →
+          操作行（应用/放弃/清除全部）在面板底部；此前操作行夹在快捷层与
+          更多层中间，更多层在操作行下方，层级不清。本改动只挪 JSX 顺序，
+          不新增焦点项、不抢焦点、不改任何筛选逻辑与请求逻辑；返回键路径
+          不变（展开时返回先收起筛选）。 */}
       {isFilterExpanded && (
         <View>
           {!selectedCategory.filterOptions || selectedCategory.filterOptions.length === 0 ? (
@@ -740,6 +745,27 @@ export default function HomeScreen() {
                   textStyle={dynamicStyles.categoryText}
                   variant="ghost"
                 />
+              </View>
+              {showMoreFilters && (
+                <FlatList
+                  data={selectedCategory.filterOptions.filter((g) =>
+                    ["lang", "score"].includes(g.key)
+                  )}
+                  renderItem={renderFilterGroup}
+                  keyExtractor={(item) => item.key}
+                  showsVerticalScrollIndicator={false}
+                />
+              )}
+              {selectedCategory.cmsFallback &&
+                (filterServiceUnavailable ? (
+                  <ThemedText style={dynamicStyles.categoryText}>
+                    筛选服务不可用，已显示豆瓣内容
+                  </ThemedText>
+                ) : (
+                  <ThemedText style={dynamicStyles.categoryText}>已回落豆瓣</ThemedText>
+                ))}
+              {/* 面板底部操作行：应用/放弃/清除全部，按钮与处理函数均与原来同一批，未改逻辑。 */}
+              <View style={dynamicStyles.filterApplyRow}>
                 {draftChanged && (
                   <>
                     <StyledButton
@@ -766,24 +792,6 @@ export default function HomeScreen() {
                   variant="ghost"
                 />
               </View>
-              {showMoreFilters && (
-                <FlatList
-                  data={selectedCategory.filterOptions.filter((g) =>
-                    ["lang", "score"].includes(g.key)
-                  )}
-                  renderItem={renderFilterGroup}
-                  keyExtractor={(item) => item.key}
-                  showsVerticalScrollIndicator={false}
-                />
-              )}
-              {selectedCategory.cmsFallback &&
-                (filterServiceUnavailable ? (
-                  <ThemedText style={dynamicStyles.categoryText}>
-                    筛选服务不可用，已显示豆瓣内容
-                  </ThemedText>
-                ) : (
-                  <ThemedText style={dynamicStyles.categoryText}>已回落豆瓣</ThemedText>
-                ))}
             </>
           )}
         </View>
