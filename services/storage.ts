@@ -3,6 +3,7 @@ import * as SecureStore from "expo-secure-store";
 import { api, PlayRecord as ApiPlayRecord, Favorite as ApiFavorite } from "./api";
 import { storageConfig } from "./storageConfig";
 import Logger from '@/utils/Logger';
+import { utf8ByteLength } from "../utils/utf8ByteLength";
 
 const logger = Logger.withTag('Storage');
 
@@ -351,7 +352,10 @@ export class M3uCacheManager {
       const data = await AsyncStorage.getItem(STORAGE_KEYS.M3U_CACHE_PREFIX + m3uUrl);
       if (!data) return null;
       // 体积预检：JSON 超限视为不可用（读回大字符串也耗时）
-      if (data.length > MAX_M3U_CACHE_BYTES) return null;
+      // 深查第 3 轮（OTV-3 同类残余）：此处旧代码用 data.length（UTF-16 码元数）
+      // 对照 MAX_M3U_CACHE_BYTES（字节），中文台名为主的列表可低估近 3 倍，
+      // 把应视为不可用的超限缓存放行进 JSON.parse；改用共享工具按 UTF-8 字节判断。
+      if (utf8ByteLength(data) > MAX_M3U_CACHE_BYTES) return null;
       const entry = JSON.parse(data) as M3uCacheEntry;
       if (!entry || !Array.isArray(entry.channels)) return null;
       if (Date.now() - entry.ts > M3U_CACHE_TTL_MS) return null; // 过期视为未命中
@@ -366,8 +370,13 @@ export class M3uCacheManager {
     try {
       const entry: M3uCacheEntry = { ts: Date.now(), channels };
       const json = JSON.stringify(entry);
-      if (json.length > MAX_M3U_CACHE_BYTES) {
-        logger.info(`m3u cache skipped (too large): ${json.length} bytes`);
+      // 深查第 3 轮（OTV-3 同类残余）：旧代码用 json.length（UTF-16 码元数）对照
+      // 字节上限，中文台名为主的列表可低估近 3 倍，超限 JSON 仍会尝试落盘
+      // （AsyncStorage 单 key 6MB 上限下 setItem 失败则缓存静默丢失，每次启动
+      // 都重新拉取）；改用共享工具按 UTF-8 字节判断，日志也按真实字节数记。
+      const jsonBytes = utf8ByteLength(json);
+      if (jsonBytes > MAX_M3U_CACHE_BYTES) {
+        logger.info(`m3u cache skipped (too large): ${jsonBytes} bytes`);
         return;
       }
       await AsyncStorage.setItem(STORAGE_KEYS.M3U_CACHE_PREFIX + m3uUrl, json);
