@@ -220,3 +220,116 @@ describe("API URL 参数编码", () => {
     expect(fetchMock.mock.calls[0][0]).toContain("id=id%20%232%20");
   });
 });
+
+describe("点播提速第 2 轮：搜索/资源缓存与 agg 总预算", () => {
+  let fetchMock: jest.Mock;
+  let api: API;
+
+  const searchBody = {
+    results: [
+      { id: 1, title: "测试影片", poster: "", episodes: ["https://example.test/1.m3u8"], source: "s1", source_name: "源一", year: "2024" },
+    ],
+  };
+  const resourcesBody = [
+    { key: "s1", api: "https://a.test", name: "源一" },
+    { key: "s2", api: "https://b.test", name: "源二" },
+  ];
+
+  beforeEach(() => {
+    fetchMock = jest.fn(async () => makeResponse(200, searchBody));
+    (global as any).fetch = fetchMock;
+    api = new API(BASE);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.clearAllMocks();
+  });
+
+  it("⑥ searchVideos：同一片名 2 分钟内只发 1 次请求（大小写/空白归一化）", async () => {
+    const first = await api.searchVideos("测试影片");
+    const second = await api.searchVideos("  测试影片 ");
+    expect(first.results).toEqual(searchBody.results);
+    expect(second.results).toEqual(searchBody.results);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("⑦ searchVideos：并发同 key 去重为同一在途请求", async () => {
+    fetchMock.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve(makeResponse(200, searchBody)), 50)),
+    );
+    const [a, b] = await Promise.all([api.searchVideos("测试影片"), api.searchVideos("测试影片")]);
+    expect(a.results).toEqual(searchBody.results);
+    expect(b.results).toEqual(searchBody.results);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("⑧ searchVideos：失败不缓存，下一次重新请求", async () => {
+    fetchMock.mockRejectedValueOnce(new Error("boom"));
+    await expect(api.searchVideos("测试影片")).rejects.toThrow("boom");
+    const retry = await api.searchVideos("测试影片");
+    expect(retry.results).toEqual(searchBody.results);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("⑨ searchVideo：同源同片名只发 1 次，不同源各发 1 次", async () => {
+    fetchMock.mockImplementation(async () => makeResponse(200, searchBody));
+    await api.searchVideo("测试影片", "s1");
+    await api.searchVideo("测试影片", "s1");
+    await api.searchVideo("测试影片", "s2");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][0]).toContain("resourceId=s2");
+  });
+
+  it("⑩ getResources：10 分钟内只发 1 次请求", async () => {
+    fetchMock.mockImplementation(async () => makeResponse(200, resourcesBody));
+    const first = await api.getResources();
+    const second = await api.getResources();
+    expect(first).toEqual(resourcesBody);
+    expect(second).toEqual(resourcesBody);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // 兼容 jest 27（advanceTimersByTimeAsync 自 jest 28 才有）：手动步进假时钟，
+  // 每步交出微任务，让 promise 链（abort → catch → 退避 setTimeout）推进。
+  async function pumpTimers(totalMs: number, stepMs = 100): Promise<void> {
+    for (let elapsed = 0; elapsed < totalMs; elapsed += stepMs) {
+      jest.advanceTimersByTime(stepMs);
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+  }
+
+  it("⑪ getAggCategory：每次尝试都挂起超时，总预算 30s 内只开 2 次尝试即停", async () => {
+    jest.useFakeTimers();
+    fetchMock.mockImplementation(pendingUntilAbort);
+    const { EMPTY_AGG_FILTERS } = require("../api");
+    const promise = api.getAggCategory(1, 1, EMPTY_AGG_FILTERS);
+    const settled = promise.then(
+      () => "resolved",
+      (e: any) => e,
+    );
+    await pumpTimers(40000);
+    jest.useRealTimers();
+    const err = await settled;
+    expect(err).toBeInstanceOf(Error);
+    // 第 1 次 15s 超时 + 1s 退避 + 第 2 次 14s 超时 = 30s 预算耗尽，不再开第 3 次
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("⑫ getAggCategory：立即失败仍可重试满 3 次", async () => {
+    jest.useFakeTimers();
+    fetchMock.mockRejectedValue(new TypeError("Network request failed"));
+    const { EMPTY_AGG_FILTERS } = require("../api");
+    const promise = api.getAggCategory(1, 1, EMPTY_AGG_FILTERS);
+    const settled = promise.then(
+      () => "resolved",
+      (e: any) => e,
+    );
+    await pumpTimers(5000);
+    jest.useRealTimers();
+    const err = await settled;
+    expect(err).toBeInstanceOf(TypeError);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
