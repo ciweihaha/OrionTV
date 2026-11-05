@@ -42,8 +42,14 @@ export default function HomeScreen() {
     fetchInitialData,
     loadMoreData,
     selectCategory,
-    setAggFilters,
     clearAggFilters,
+    setPendingFilter,
+    applyPendingFilters,
+    discardPendingFilters,
+    clearAggFilterGroup,
+    restoreFilterMemory,
+    pendingFilters,
+    filterServiceUnavailable,
     filtersVisible,
     toggleFilters,
     setFiltersVisible,
@@ -52,6 +58,12 @@ export default function HomeScreen() {
   } = useHomeStore();
   const { isLoggedIn, logout } = useAuthStore();
   const apiConfigStatus = useApiConfig();
+
+  // 2026-11-05：冷启动先恢复按分类记忆的筛选。恢复本身不发请求，
+  // 记忆要在第一次进入 CMS 分类之前就位，否则 selectCategory 会用 EMPTY 覆盖。
+  useEffect(() => {
+    restoreFilterMemory();
+  }, [restoreFilterMemory]);
 
   useFocusEffect(
     useCallback(() => {
@@ -174,47 +186,263 @@ export default function HomeScreen() {
     }
   };
 
-  // CMS 筛选：UI 只转发给 store，不持有业务状态（筛选不走本地状态，见方案第 3 节）。
-  // 选项的 v（不是 n）才是 agg 参数值，“全部/默认”的 v 为空串，点它等于清空该组。
+  // 2026-11-05 筛选重做：UI 只持有“更多面板是否展开”“年份年代段”这种
+  // 纯展示状态，筛选业务值仍在 store。选项的 v（不是 n）才是 agg 参数值，
+  // “全部/默认”的 v 为空串，点它等于清空该组。
+  // 草稿模型：组内点选项只改 pendingFilters，不发请求；点“应用”才由
+  // store 一次性写成已应用并重查，连选多组只发 1 次请求。已选 chips
+  // 展示的是草稿值（即用户刚点的），“应用”按钮只在草稿与已应用不一致时出现。
+  // 单组清除有两条路：chips 上的叉只改草稿（再点应用才生效），
+  // 展开面板里每组头部的“清除”立即生效并重查 1 次；“清除全部”始终立即生效。
+  const [showMoreFilters, setShowMoreFilters] = useState(false);
+  const [expandedYearDecade, setExpandedYearDecade] = useState<string | null>(null);
+  const groupListRefs = useRef<Record<string, FlatList | null>>({});
   const isCmsCategory = !!selectedCategory?.cmsType;
-  // 1.4.1：筛选栏是否渲染只由开关决定，与筛选值、选项、回落无关。
-  // 默认 false（隐藏），切换分类时 store 已重置为 false。
   const isFilterExpanded = isCmsCategory && filtersVisible;
   const activeFilters = selectedCategory?.filters || EMPTY_AGG_FILTERS;
+  const draftFilters = pendingFilters || activeFilters;
   const isFiltered = Object.values(activeFilters).some((v) => !!v);
+  const draftChanged =
+    JSON.stringify(draftFilters) !== JSON.stringify(activeFilters);
+  const appliedCount = Object.values(activeFilters).filter((v) => !!v).length;
+  const draftCount = Object.values(draftFilters).filter((v) => !!v).length;
   const handleFilterSelect = (key: AggFilterGroup["key"], value: string) => {
-    setAggFilters({ [key]: value } as Partial<typeof activeFilters>);
+    setPendingFilter(key, value);
+  };
+  const handleApplyFilters = () => {
+    applyPendingFilters();
+  };
+  const handleToggleFilters = () => {
+    // 收起不丢草稿：收起栏同样显示“应用”按钮，草稿不会被藏起来。
+    toggleFilters();
+  };
+  const getOptionName = (key: AggFilterGroup["key"], value: string): string => {
+    if (!value) return "";
+    const group = selectedCategory?.filterOptions?.find((g) => g.key === key);
+    return group?.value.find((o) => o.v === value)?.n || value;
+  };
+  // 地区常用置顶：只改展示顺序，不改 agg 选项本身；“全部”永远在第一位。
+  const COMMON_AREAS = ["大陆", "香港", "台湾", "美国", "韩国", "日本", "英国", "法国"];
+  const orderAreaOptions = (group: AggFilterGroup) => {
+    const all = group.value.filter((o) => o.v === "");
+    const rest = group.value.filter((o) => o.v !== "");
+    const ranked = rest.filter((o) => COMMON_AREAS.includes(o.n));
+    ranked.sort((a, b) => COMMON_AREAS.indexOf(a.n) - COMMON_AREAS.indexOf(b.n));
+    const others = rest.filter((o) => !COMMON_AREAS.includes(o.n));
+    return [...all, ...ranked, ...others];
+  };
+  // 年份按年代段分：选项 v 为数字年份时算年代，否则归入“其他”。
+  // “全部”不进年代段，单独放在年代段选择行里。
+  const getYearDecade = (v: string): string | null => {
+    const y = parseInt(v, 10);
+    if (Number.isNaN(y)) return null;
+    return `${Math.floor(y / 10) * 10}年代`;
+  };
+  // 已选值自动滚到可见：尽力而为，scrollToIndex 失败时不抛错、不影响筛选。
+  useEffect(() => {
+    if (!isFilterExpanded || !selectedCategory?.filterOptions) return;
+    for (const group of selectedCategory.filterOptions) {
+      const options = group.key === "area" ? orderAreaOptions(group) : group.value;
+      const idx = options.findIndex((o) => o.v === (draftFilters[group.key] || ""));
+      if (idx <= 0) continue;
+      const ref = groupListRefs.current[group.key];
+      try {
+        ref?.scrollToIndex({ index: idx, animated: false, viewPosition: 0.5 });
+      } catch {
+        // 布局未就绪时忽略，下一次渲染再试。
+      }
+    }
+    // 只在展开/选项/草稿变化时尝试滚动，不监听整个 draft 对象以外的状态。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFilterExpanded, selectedCategory?.filterOptions, draftFilters]);
+
+  // 2026-11-05 焦点说明：筛选选项仍不带 hasTVPreferredFocus（1.4.1 的
+  // 教训：首项自动抢焦点会让展开后难以回到开关）。TV 端的可见焦点框
+  // 来自 StyledButton 自身的 focused 样式（边框 + 背景），已选组在组名
+  // 前加“✓”前缀，空间导航仍是：开关 → 筛选排 → 内容网格。
+  // 草稿模型：这里点选项只改 pending，不发请求；isSelected 对照草稿值，
+  // 不是已应用值，否则连选时已选态会来回跳。
+  const renderFilterGroup = ({ item: group }: { item: AggFilterGroup }) => {
+    const options = group.key === "area" ? orderAreaOptions(group) : group.value;
+    const groupLabel = draftFilters[group.key] ? `✓ ${group.name}` : group.name;
+    return (
+      <View style={dynamicStyles.filterRow}>
+        <ThemedText style={dynamicStyles.filterGroupName}>{groupLabel}</ThemedText>
+        <FlatList
+          ref={(ref) => {
+            groupListRefs.current[group.key] = ref;
+          }}
+          data={options}
+          renderItem={({ item }) => {
+            const isSelected = (draftFilters[group.key] || "") === item.v;
+            return (
+              <StyledButton
+                text={item.n}
+                onPress={() => handleFilterSelect(group.key, item.v)}
+                isSelected={isSelected}
+                style={dynamicStyles.categoryButton}
+                textStyle={dynamicStyles.categoryText}
+                variant="ghost"
+              />
+            );
+          }}
+          keyExtractor={(item) => `${item.v}|${item.n}`}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={dynamicStyles.categoryListContent}
+          onScrollToIndexFailed={() => {
+            // 布局未就绪时忽略自动滚动，不阻塞筛选。
+          }}
+        />
+        <StyledButton
+          text="清除"
+          onPress={() => clearAggFilterGroup(group.key)}
+          style={dynamicStyles.categoryButton}
+          textStyle={dynamicStyles.categoryText}
+          variant="ghost"
+        />
+      </View>
+    );
   };
 
-  // 1.4.1 焦点说明：筛选选项不再带 hasTVPreferredFocus。1.4.0 里第一组首项
-  // 自动抢焦点，在开关控制下会变成“每次展开都强行跳到首项”，且展开后用户
-  // 难以回到开关收起。改为空间导航：焦点停在开关上，按下方向键自然进入
-  // 筛选排，再按下进入内容网格；选值只改 isSelected，不移动焦点。
-  const renderFilterGroup = ({ item: group }: { item: AggFilterGroup }) => (
-    <View style={dynamicStyles.filterRow}>
-      <ThemedText style={dynamicStyles.filterGroupName}>{group.name}</ThemedText>
-      <FlatList
-        data={group.value}
-        renderItem={({ item }) => {
-          const isSelected = (activeFilters[group.key] || "") === item.v;
-          return (
-            <StyledButton
-              text={item.n}
-              onPress={() => handleFilterSelect(group.key, item.v)}
-              isSelected={isSelected}
-              style={dynamicStyles.categoryButton}
-              textStyle={dynamicStyles.categoryText}
-              variant="ghost"
+  // 年份年代段：先选年代段，再选该段内的具体年份，避免逐年横滑到底。
+  // 年代段本身不进 agg 参数，只有具体年份的 v 才是参数值。
+  const renderYearGroup = (group: AggFilterGroup) => {
+    const allOption = group.value.find((o) => o.v === "");
+    const yearOptions = group.value.filter((o) => o.v !== "");
+    const decades: string[] = [];
+    for (const o of yearOptions) {
+      const d = getYearDecade(o.v);
+      if (d && !decades.includes(d)) decades.push(d);
+    }
+    decades.sort((a, b) => parseInt(b, 10) - parseInt(a, 10));
+    const draftDecade = getYearDecade(draftFilters.year || "");
+    const activeDecade = expandedYearDecade || draftDecade || decades[0] || null;
+    const visibleYears = activeDecade
+      ? yearOptions.filter((o) => getYearDecade(o.v) === activeDecade)
+      : yearOptions;
+    return (
+      <View>
+        <View style={dynamicStyles.filterRow}>
+          <ThemedText style={dynamicStyles.filterGroupName}>
+            {draftFilters.year ? `✓ ${group.name}` : group.name}
+          </ThemedText>
+          <FlatList
+            data={[
+              ...(allOption ? [allOption] : []),
+              ...decades.map((d) => ({ n: d, v: `decade:${d}` })),
+            ]}
+            renderItem={({ item }) => {
+              const isDecade = item.v.startsWith("decade:");
+              const isSelected = isDecade
+                ? activeDecade === item.n
+                : (draftFilters.year || "") === item.v;
+              return (
+                <StyledButton
+                  text={item.n}
+                  onPress={() => {
+                    if (isDecade) {
+                      setExpandedYearDecade(item.n);
+                    } else {
+                      handleFilterSelect("year", item.v);
+                    }
+                  }}
+                  isSelected={isSelected}
+                  style={dynamicStyles.categoryButton}
+                  textStyle={dynamicStyles.categoryText}
+                  variant="ghost"
+                />
+              );
+            }}
+            keyExtractor={(item) => `${item.v}|${item.n}`}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={dynamicStyles.categoryListContent}
+          />
+          <StyledButton
+            text="清除"
+            onPress={() => clearAggFilterGroup("year")}
+            style={dynamicStyles.categoryButton}
+            textStyle={dynamicStyles.categoryText}
+            variant="ghost"
+          />
+        </View>
+        {activeDecade && (
+          <View style={dynamicStyles.filterRow}>
+            <ThemedText style={dynamicStyles.filterGroupName}>{activeDecade}</ThemedText>
+            <FlatList
+              data={visibleYears}
+              renderItem={({ item }) => {
+                const isSelected = (draftFilters.year || "") === item.v;
+                return (
+                  <StyledButton
+                    text={item.n}
+                    onPress={() => handleFilterSelect("year", item.v)}
+                    isSelected={isSelected}
+                    style={dynamicStyles.categoryButton}
+                    textStyle={dynamicStyles.categoryText}
+                    variant="ghost"
+                  />
+                );
+              }}
+              keyExtractor={(item) => `${item.v}|${item.n}`}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={dynamicStyles.categoryListContent}
             />
-          );
-        }}
-        keyExtractor={(item) => `${item.v}|${item.n}`}
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={dynamicStyles.categoryListContent}
-      />
-    </View>
-  );
+          </View>
+        )}
+      </View>
+    );
+  };
+
+  // 已选 chips：展示草稿值，点叉只改草稿（再点“应用”才生效），
+  // 与展开面板里每组头部的“清除”（立即生效）语义分开，见文件顶部注释。
+  const renderSelectedChips = () => {
+    const keys: AggFilterGroup["key"][] = ["cate", "area", "year", "lang", "score", "order"];
+    const chips = keys
+      .map((key) => {
+        const value = draftFilters[key] || "";
+        if (!value) return null;
+        const group = selectedCategory?.filterOptions?.find((g) => g.key === key);
+        return { key, label: `${group?.name || key}：${getOptionName(key, value)}` };
+      })
+      .filter((c): c is { key: AggFilterGroup["key"]; label: string } => !!c);
+    if (chips.length === 0 && !draftChanged) return null;
+    return (
+      <View style={dynamicStyles.filterChipRow}>
+        {chips.map((chip) => (
+          <StyledButton
+            key={chip.key}
+            text={`${chip.label} ×`}
+            onPress={() => handleFilterSelect(chip.key, "")}
+            isSelected
+            style={dynamicStyles.categoryButton}
+            textStyle={dynamicStyles.categoryText}
+            variant="ghost"
+          />
+        ))}
+        {draftChanged && (
+          <StyledButton
+            text="应用"
+            onPress={handleApplyFilters}
+            style={dynamicStyles.categoryButton}
+            textStyle={dynamicStyles.categoryText}
+            variant="primary"
+          />
+        )}
+        {(isFiltered || draftCount > 0) && (
+          <StyledButton
+            text="清除全部"
+            onPress={() => clearAggFilters()}
+            style={dynamicStyles.categoryButton}
+            textStyle={dynamicStyles.categoryText}
+            variant="ghost"
+          />
+        )}
+      </View>
+    );
+  };
 
   const renderCategory = ({ item }: { item: Category }) => {
     const isSelected = selectedCategory?.title === item.title;
@@ -356,6 +584,30 @@ export default function HomeScreen() {
       fontWeight: "500",
       width: 64,
     },
+    // 2026-11-05：已选 chips 行（可换行，避免横滑到底）、应用/清除行、
+    // 选项骨架行。chips 行在收起和展开两种状态下都渲染，草稿不会被藏起来。
+    filterChipRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      alignItems: "center",
+      paddingBottom: spacing / 2,
+      paddingHorizontal: spacing,
+      gap: spacing / 2,
+    },
+    filterApplyRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingBottom: spacing / 2,
+      paddingHorizontal: spacing,
+      gap: spacing / 2,
+    },
+    filterSkeletonRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingBottom: spacing / 2,
+      paddingHorizontal: spacing,
+      gap: spacing / 2,
+    },
     contentContainer: {
       flex: 1,
     },
@@ -408,54 +660,132 @@ export default function HomeScreen() {
         </View>
       )}
 
-      {/* 1.4.1 筛选开关：仅 CMS 分类渲染，紧贴分类排下方，一行紧凑高度。
-          开关本身始终挂载（展开/收起都不卸载），是收起后的焦点落点：
-          展开时焦点停在开关上，按下进入筛选排；收起时筛选排卸载，焦点
-          回到开关，从开关上按一下进入分类排、下按进入内容网格首项。
-          非 CMS 分类（热门剧集、豆瓣 Top250、最近播放）不渲染开关、不出筛选。
-          开关不带 hasTVPreferredFocus：不抢分类排的焦点，不在切换分类时跳焦点。
-          收起时若已有筛选，文案带“已选”提示，避免隐藏的筛选被遗忘；
-          展开时文案为“收起”，选值、重置均不自动收起。 */}
+      {/* 2026-11-05 筛选开关：仅 CMS 分类渲染。默认展开（store 默认 true，
+          记忆恢复后以记忆为准），开关本身始终挂载，是收起后的焦点落点，
+          TV 端不带 hasTVPreferredFocus，不抢分类排焦点。收起时不再只写
+          “已选”二字，而是直接渲染已选 chips + 已选组数 + 清除全部，
+          草稿也不会被藏起来（收起栏同样有“应用”按钮）。 */}
       {isCmsCategory && (
         <View style={dynamicStyles.filterToggleRow}>
           <StyledButton
-            text={filtersVisible ? "收起筛选" : isFiltered ? "筛选（已选）" : "筛选"}
-            onPress={() => toggleFilters()}
+            text={
+              filtersVisible
+                ? "收起筛选"
+                : isFiltered
+                  ? `筛选（已选 ${appliedCount} 组）`
+                  : "筛选"
+            }
+            onPress={handleToggleFilters}
             isSelected={filtersVisible}
             style={dynamicStyles.categoryButton}
             textStyle={dynamicStyles.categoryText}
             variant="ghost"
           />
-          {selectedCategory?.cmsFallback && (
-            <ThemedText style={dynamicStyles.categoryText}>已回落豆瓣</ThemedText>
-          )}
+          {selectedCategory?.cmsFallback &&
+            (filterServiceUnavailable ? (
+              <ThemedText style={dynamicStyles.categoryText}>
+                筛选服务不可用，已显示豆瓣内容
+              </ThemedText>
+            ) : (
+              <ThemedText style={dynamicStyles.categoryText}>已回落豆瓣</ThemedText>
+            ))}
         </View>
       )}
 
-      {/* CMS 筛选栏：仅开关展开时渲染，收起时完全不占高度（条件渲染，不是用
-          高度/透明度藏起来），内容网格直接顶上来可见。首屏未返回选项前，
-          即使已展开也不渲染空栏占位，选项返回后才出现（loadMoreData 把 agg
-          的 filters 存入 filterOptions）。选值、重置均不收起，可连选多组。 */}
-      {isFilterExpanded && selectedCategory.filterOptions && selectedCategory.filterOptions.length > 0 && (
+      {/* CMS 已选 chips：收起和展开两种状态下都渲染，点叉只改草稿，
+          再点“应用”才生效；“清除全部”始终立即生效。 */}
+      {isCmsCategory && renderSelectedChips()}
+
+      {/* CMS 筛选栏：展开时渲染，分层——第一层只放类型、年份、地区、
+          排序 4 组快捷项，语言、评分收进“更多筛选”。组内点选项只改草稿，
+          点“应用”才发 1 次请求；选值、重置均不自动收起。选项未到时
+          显示骨架而不是空栏；agg 失败时明确写服务不可用，不静默回落。 */}
+      {isFilterExpanded && (
         <View>
-          <FlatList
-            data={selectedCategory.filterOptions}
-            renderItem={renderFilterGroup}
-            keyExtractor={(item) => item.key}
-            showsVerticalScrollIndicator={false}
-          />
-          <View style={dynamicStyles.filterRow}>
-            <StyledButton
-              text="重置筛选"
-              onPress={() => clearAggFilters()}
-              style={dynamicStyles.categoryButton}
-              textStyle={dynamicStyles.categoryText}
-              variant="ghost"
-            />
-            {selectedCategory.cmsFallback && (
-              <ThemedText style={dynamicStyles.categoryText}>已回落豆瓣</ThemedText>
-            )}
-          </View>
+          {!selectedCategory.filterOptions || selectedCategory.filterOptions.length === 0 ? (
+            <View style={dynamicStyles.filterSkeletonRow}>
+              {loading ? (
+                <>
+                  <ActivityIndicator size="small" />
+                  <ThemedText style={dynamicStyles.categoryText}>
+                    正在加载筛选选项…
+                  </ThemedText>
+                </>
+              ) : filterServiceUnavailable ? (
+                <ThemedText style={dynamicStyles.categoryText}>
+                  筛选服务不可用，已显示豆瓣内容
+                </ThemedText>
+              ) : (
+                <ThemedText style={dynamicStyles.categoryText}>暂无筛选选项</ThemedText>
+              )}
+            </View>
+          ) : (
+            <>
+              <FlatList
+                data={selectedCategory.filterOptions.filter((g) =>
+                  ["cate", "area", "year", "order"].includes(g.key)
+                )}
+                renderItem={({ item }) =>
+                  item.key === "year" ? renderYearGroup(item) : renderFilterGroup({ item })
+                }
+                keyExtractor={(item) => item.key}
+                showsVerticalScrollIndicator={false}
+              />
+              <View style={dynamicStyles.filterApplyRow}>
+                <StyledButton
+                  text={showMoreFilters ? "收起更多筛选" : "更多筛选"}
+                  onPress={() => setShowMoreFilters(!showMoreFilters)}
+                  isSelected={showMoreFilters}
+                  style={dynamicStyles.categoryButton}
+                  textStyle={dynamicStyles.categoryText}
+                  variant="ghost"
+                />
+                {draftChanged && (
+                  <>
+                    <StyledButton
+                      text="应用"
+                      onPress={handleApplyFilters}
+                      style={dynamicStyles.categoryButton}
+                      textStyle={dynamicStyles.categoryText}
+                      variant="primary"
+                    />
+                    <StyledButton
+                      text="放弃修改"
+                      onPress={() => discardPendingFilters()}
+                      style={dynamicStyles.categoryButton}
+                      textStyle={dynamicStyles.categoryText}
+                      variant="ghost"
+                    />
+                  </>
+                )}
+                <StyledButton
+                  text="清除全部"
+                  onPress={() => clearAggFilters()}
+                  style={dynamicStyles.categoryButton}
+                  textStyle={dynamicStyles.categoryText}
+                  variant="ghost"
+                />
+              </View>
+              {showMoreFilters && (
+                <FlatList
+                  data={selectedCategory.filterOptions.filter((g) =>
+                    ["lang", "score"].includes(g.key)
+                  )}
+                  renderItem={renderFilterGroup}
+                  keyExtractor={(item) => item.key}
+                  showsVerticalScrollIndicator={false}
+                />
+              )}
+              {selectedCategory.cmsFallback &&
+                (filterServiceUnavailable ? (
+                  <ThemedText style={dynamicStyles.categoryText}>
+                    筛选服务不可用，已显示豆瓣内容
+                  </ThemedText>
+                ) : (
+                  <ThemedText style={dynamicStyles.categoryText}>已回落豆瓣</ThemedText>
+                ))}
+            </>
+          )}
         </View>
       )}
 
