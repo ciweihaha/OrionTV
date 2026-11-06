@@ -4,7 +4,7 @@ import { ThemedView } from "@/components/ThemedView";
 import { ThemedText } from "@/components/ThemedText";
 import VideoCard from "@/components/VideoCard";
 import VideoLoadingAnimation from "@/components/VideoLoadingAnimation";
-import { api, SearchResult } from "@/services/api";
+import { api, SearchResult, classifySearchError, SearchErrorKind } from "@/services/api";
 import { Search, QrCode, X } from "lucide-react-native";
 import { StyledButton } from "@/components/StyledButton";
 import { useRemoteControlStore } from "@/stores/remoteControlStore";
@@ -22,6 +22,16 @@ import { DeviceUtils } from "@/utils/DeviceUtils";
 import Logger from '@/utils/Logger';
 
 const logger = Logger.withTag('SearchScreen');
+
+// 2026-11-06 第二轮（P1-3）：搜索失败按原因分文案，不再一律“搜索失败，请稍后重试”。
+// 401 未登录 / 超时 / 网络失败 / 其他失败各一句；0 结果另有一句，换关键词提示。
+const SEARCH_ERROR_MESSAGES: Record<SearchErrorKind, string> = {
+  unauthorized: "未登录或登录已过期，请先登录后再搜索。",
+  timeout: "搜索超时，网络较慢，请稍后重试。",
+  network: "网络连接失败，请检查网络后重试。",
+  unknown: "搜索失败，请稍后重试。",
+};
+const SEARCH_NO_RESULT_MESSAGE = "没有找到相关内容，换个关键词试试。";
 
 export default function SearchScreen() {
   const [keyword, setKeyword] = useState("");
@@ -108,10 +118,10 @@ export default function SearchScreen() {
             // 搜索成功后记录历史（V1.5）
             SearchHistoryManager.add(term).then(() => SearchHistoryManager.get()).then(setSearchHistory).catch(() => {});
           } else {
-            setError("没有找到相关内容");
+            setError(SEARCH_NO_RESULT_MESSAGE);
           }
         } catch (err) {
-          setError("搜索失败，请稍后重试。");
+          setError(SEARCH_ERROR_MESSAGES[classifySearchError(err)]);
           logger.info("Search failed:", err);
         } finally {
           setLoading(false);

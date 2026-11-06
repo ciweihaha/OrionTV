@@ -44,8 +44,6 @@ export default function HomeScreen() {
     selectCategory,
     clearAggFilters,
     setPendingFilter,
-    applyPendingFilters,
-    discardPendingFilters,
     clearAggFilterGroup,
     restoreFilterMemory,
     pendingFilters,
@@ -186,34 +184,30 @@ export default function HomeScreen() {
     }
   };
 
-  // 2026-11-05 筛选重做：UI 只持有“更多面板是否展开”“年份年代段”这种
-  // 纯展示状态，筛选业务值仍在 store。选项的 v（不是 n）才是 agg 参数值，
-  // “全部/默认”的 v 为空串，点它等于清空该组。
-  // 草稿模型：组内点选项只改 pendingFilters，不发请求；点“应用”才由
-  // store 一次性写成已应用并重查，连选多组只发 1 次请求。已选 chips
-  // 展示的是草稿值（即用户刚点的），“应用”按钮只在草稿与已应用不一致时出现。
-  // 单组清除有两条路：chips 上的叉只改草稿（再点应用才生效），
-  // 展开面板里每组头部的“清除”立即生效并重查 1 次；“清除全部”始终立即生效。
+  // 2026-11-06 第二轮（P1-2 方案 A）：选了即生效，草稿模型已废弃。
+  // UI 只持有“更多面板是否展开”“年份年代段”这种纯展示状态，筛选业务值仍在 store。
+  // 选项的 v（不是 n）才是 agg 参数值，“全部/默认”的 v 为空串，点它等于清空该组。
+  // 组内点选项：setPendingFilter 立即改已选态，500ms 防抖后自动应用并重查，
+  // 连选多组只发 1 次请求（见 homeStore.schedulePendingApply），不再等“应用”；
+  // “应用”/“放弃修改”按钮已删除。已选 chips 展示的是已选值，点叉即清即生效。
+  // 单组清除有两条路：chips 上的叉与展开面板里每组头部的“清除”，均立即生效并重查；
+  // “清除全部”始终立即生效。
   const [showMoreFilters, setShowMoreFilters] = useState(false);
   const [expandedYearDecade, setExpandedYearDecade] = useState<string | null>(null);
   const groupListRefs = useRef<Record<string, FlatList | null>>({});
   const isCmsCategory = !!selectedCategory?.cmsType;
   const isFilterExpanded = isCmsCategory && filtersVisible;
   const activeFilters = selectedCategory?.filters || EMPTY_AGG_FILTERS;
-  const draftFilters = pendingFilters || activeFilters;
+  // pickedFilters = 已选值（pendingFilters 与已应用值在防抖窗口内可能短暂不一致，
+  // 500ms 后收敛；isSelected 与 chips 一律对照它，用户刚点的选项立即显示已选态）。
+  const pickedFilters = pendingFilters || activeFilters;
   const isFiltered = Object.values(activeFilters).some((v) => !!v);
-  const draftChanged =
-    JSON.stringify(draftFilters) !== JSON.stringify(activeFilters);
   const appliedCount = Object.values(activeFilters).filter((v) => !!v).length;
-  const draftCount = Object.values(draftFilters).filter((v) => !!v).length;
   const handleFilterSelect = (key: AggFilterGroup["key"], value: string) => {
     setPendingFilter(key, value);
   };
-  const handleApplyFilters = () => {
-    applyPendingFilters();
-  };
   const handleToggleFilters = () => {
-    // 收起不丢草稿：收起栏同样显示“应用”按钮，草稿不会被藏起来。
+    // 2026-11-06 方案 A：收起不丢已选值，chips 行在收起时同样渲染，已选态不会被藏起来。
     toggleFilters();
   };
   const getOptionName = (key: AggFilterGroup["key"], value: string): string => {
@@ -243,7 +237,7 @@ export default function HomeScreen() {
     if (!isFilterExpanded || !selectedCategory?.filterOptions) return;
     for (const group of selectedCategory.filterOptions) {
       const options = group.key === "area" ? orderAreaOptions(group) : group.value;
-      const idx = options.findIndex((o) => o.v === (draftFilters[group.key] || ""));
+      const idx = options.findIndex((o) => o.v === (pickedFilters[group.key] || ""));
       if (idx <= 0) continue;
       const ref = groupListRefs.current[group.key];
       try {
@@ -252,19 +246,19 @@ export default function HomeScreen() {
         // 布局未就绪时忽略，下一次渲染再试。
       }
     }
-    // 只在展开/选项/草稿变化时尝试滚动，不监听整个 draft 对象以外的状态。
+    // 只在展开/选项/已选值变化时尝试滚动，不监听整个 picked 对象以外的状态。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isFilterExpanded, selectedCategory?.filterOptions, draftFilters]);
+  }, [isFilterExpanded, selectedCategory?.filterOptions, pickedFilters]);
 
   // 2026-11-05 焦点说明：筛选选项仍不带 hasTVPreferredFocus（1.4.1 的
   // 教训：首项自动抢焦点会让展开后难以回到开关）。TV 端的可见焦点框
   // 来自 StyledButton 自身的 focused 样式（边框 + 背景），已选组在组名
   // 前加“✓”前缀，空间导航仍是：开关 → 筛选排 → 内容网格。
-  // 草稿模型：这里点选项只改 pending，不发请求；isSelected 对照草稿值，
+  // 方案 A：这里点选项即改已选态、防抖后自动应用；isSelected 对照已选值，
   // 不是已应用值，否则连选时已选态会来回跳。
   const renderFilterGroup = ({ item: group }: { item: AggFilterGroup }) => {
     const options = group.key === "area" ? orderAreaOptions(group) : group.value;
-    const groupLabel = draftFilters[group.key] ? `✓ ${group.name}` : group.name;
+    const groupLabel = pickedFilters[group.key] ? `✓ ${group.name}` : group.name;
     return (
       <View style={dynamicStyles.filterRow}>
         <ThemedText style={dynamicStyles.filterGroupName}>{groupLabel}</ThemedText>
@@ -274,7 +268,7 @@ export default function HomeScreen() {
           }}
           data={options}
           renderItem={({ item }) => {
-            const isSelected = (draftFilters[group.key] || "") === item.v;
+            const isSelected = (pickedFilters[group.key] || "") === item.v;
             return (
               <StyledButton
                 text={item.n}
@@ -316,8 +310,8 @@ export default function HomeScreen() {
       if (d && !decades.includes(d)) decades.push(d);
     }
     decades.sort((a, b) => parseInt(b, 10) - parseInt(a, 10));
-    const draftDecade = getYearDecade(draftFilters.year || "");
-    const activeDecade = expandedYearDecade || draftDecade || decades[0] || null;
+    const pickedDecade = getYearDecade(pickedFilters.year || "");
+    const activeDecade = expandedYearDecade || pickedDecade || decades[0] || null;
     const visibleYears = activeDecade
       ? yearOptions.filter((o) => getYearDecade(o.v) === activeDecade)
       : yearOptions;
@@ -325,7 +319,7 @@ export default function HomeScreen() {
       <View>
         <View style={dynamicStyles.filterRow}>
           <ThemedText style={dynamicStyles.filterGroupName}>
-            {draftFilters.year ? `✓ ${group.name}` : group.name}
+            {pickedFilters.year ? `✓ ${group.name}` : group.name}
           </ThemedText>
           <FlatList
             data={[
@@ -336,7 +330,7 @@ export default function HomeScreen() {
               const isDecade = item.v.startsWith("decade:");
               const isSelected = isDecade
                 ? activeDecade === item.n
-                : (draftFilters.year || "") === item.v;
+                : (pickedFilters.year || "") === item.v;
               return (
                 <StyledButton
                   text={item.n}
@@ -373,7 +367,7 @@ export default function HomeScreen() {
             <FlatList
               data={visibleYears}
               renderItem={({ item }) => {
-                const isSelected = (draftFilters.year || "") === item.v;
+                const isSelected = (pickedFilters.year || "") === item.v;
                 return (
                   <StyledButton
                     text={item.n}
@@ -396,19 +390,19 @@ export default function HomeScreen() {
     );
   };
 
-  // 已选 chips：展示草稿值，点叉只改草稿（再点“应用”才生效），
-  // 与展开面板里每组头部的“清除”（立即生效）语义分开，见文件顶部注释。
+  // 已选 chips：展示已选值，点叉即清即生效（防抖 500ms 后重查），
+  // 与展开面板里每组头部的“清除”（立即生效）语义一致，见文件顶部注释。
   const renderSelectedChips = () => {
     const keys: AggFilterGroup["key"][] = ["cate", "area", "year", "lang", "score", "order"];
     const chips = keys
       .map((key) => {
-        const value = draftFilters[key] || "";
+        const value = pickedFilters[key] || "";
         if (!value) return null;
         const group = selectedCategory?.filterOptions?.find((g) => g.key === key);
         return { key, label: `${group?.name || key}：${getOptionName(key, value)}` };
       })
       .filter((c): c is { key: AggFilterGroup["key"]; label: string } => !!c);
-    if (chips.length === 0 && !draftChanged) return null;
+    if (chips.length === 0) return null;
     return (
       <View style={dynamicStyles.filterChipRow}>
         {chips.map((chip) => (
@@ -422,16 +416,7 @@ export default function HomeScreen() {
             variant="ghost"
           />
         ))}
-        {draftChanged && (
-          <StyledButton
-            text="应用"
-            onPress={handleApplyFilters}
-            style={dynamicStyles.categoryButton}
-            textStyle={dynamicStyles.categoryText}
-            variant="primary"
-          />
-        )}
-        {(isFiltered || draftCount > 0) && (
+        {isFiltered && (
           <StyledButton
             text="清除全部"
             onPress={() => clearAggFilters()}
@@ -584,8 +569,8 @@ export default function HomeScreen() {
       fontWeight: "500",
       width: 64,
     },
-    // 2026-11-05：已选 chips 行（可换行，避免横滑到底）、应用/清除行、
-    // 选项骨架行。chips 行在收起和展开两种状态下都渲染，草稿不会被藏起来。
+    // 2026-11-05：已选 chips 行（可换行，避免横滑到底）、清除行、
+    // 选项骨架行。chips 行在收起和展开两种状态下都渲染，已选值不会被藏起来。
     filterChipRow: {
       flexDirection: "row",
       flexWrap: "wrap",
@@ -664,7 +649,7 @@ export default function HomeScreen() {
           记忆恢复后以记忆为准），开关本身始终挂载，是收起后的焦点落点，
           TV 端不带 hasTVPreferredFocus，不抢分类排焦点。收起时不再只写
           “已选”二字，而是直接渲染已选 chips + 已选组数 + 清除全部，
-          草稿也不会被藏起来（收起栏同样有“应用”按钮）。 */}
+          已选值不会被藏起来。 */}
       {isCmsCategory && (
         <View style={dynamicStyles.filterToggleRow}>
           <StyledButton
@@ -692,16 +677,17 @@ export default function HomeScreen() {
         </View>
       )}
 
-      {/* CMS 已选 chips：收起和展开两种状态下都渲染，点叉只改草稿，
-          再点“应用”才生效；“清除全部”始终立即生效。 */}
+      {/* CMS 已选 chips：收起和展开两种状态下都渲染，点叉即清即生效；
+          “清除全部”始终立即生效。 */}
       {isCmsCategory && renderSelectedChips()}
 
       {/* CMS 筛选栏：展开时渲染，分层——第一层只放类型、年份、地区、
-          排序 4 组快捷项，语言、评分收进“更多筛选”。组内点选项只改草稿，
-          点“应用”才发 1 次请求；选值、重置均不自动收起。选项未到时
+          排序 4 组快捷项，语言、评分收进“更多筛选”。2026-11-06 方案 A：
+          组内点选项即生效（500ms 防抖合并，连选多组只发 1 次请求），
+          不再等“应用”；选值、重置均不自动收起。选项未到时
           显示骨架而不是空栏；agg 失败时明确写服务不可用，不静默回落。
           2026-11-05 第 2 轮：面板顺序改为 快捷层 → 更多开关 → 更多层 →
-          操作行（应用/放弃/清除全部）在面板底部；此前操作行夹在快捷层与
+          操作行（清除全部）在面板底部；此前操作行夹在快捷层与
           更多层中间，更多层在操作行下方，层级不清。本改动只挪 JSX 顺序，
           不新增焦点项、不抢焦点、不改任何筛选逻辑与请求逻辑；返回键路径
           不变（展开时返回先收起筛选）。 */}
@@ -764,26 +750,9 @@ export default function HomeScreen() {
                 ) : (
                   <ThemedText style={dynamicStyles.categoryText}>已回落豆瓣</ThemedText>
                 ))}
-              {/* 面板底部操作行：应用/放弃/清除全部，按钮与处理函数均与原来同一批，未改逻辑。 */}
+              {/* 面板底部操作行：2026-11-06 方案 A 已删“应用/放弃修改”，
+                  点选项即生效，只剩“清除全部”。 */}
               <View style={dynamicStyles.filterApplyRow}>
-                {draftChanged && (
-                  <>
-                    <StyledButton
-                      text="应用"
-                      onPress={handleApplyFilters}
-                      style={dynamicStyles.categoryButton}
-                      textStyle={dynamicStyles.categoryText}
-                      variant="primary"
-                    />
-                    <StyledButton
-                      text="放弃修改"
-                      onPress={() => discardPendingFilters()}
-                      style={dynamicStyles.categoryButton}
-                      textStyle={dynamicStyles.categoryText}
-                      variant="ghost"
-                    />
-                  </>
-                )}
                 <StyledButton
                   text="清除全部"
                   onPress={() => clearAggFilters()}
