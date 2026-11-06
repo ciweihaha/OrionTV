@@ -21,6 +21,9 @@ const CHANNEL_TITLE_DISPLAY_MS = 3000;
 const DIGIT_COMMIT_MS = 1500;
 // 坏源自动跳台的连续失败上限（防死循环）
 const MAX_AUTO_SKIP = 5;
+// 2026-11-06 第二轮（P2-2）：上限耗尽后的一次性延迟再试间隔（毫秒）。
+// 只追加一次延迟自动再试，不无限循环；用户手动换台或播放成功即取消/重置。
+const DELAYED_RETRY_MS = 30_000;
 // 收藏虚拟分组 key（不与真实分组名冲突）
 const FAV_GROUP = "__fav__";
 
@@ -56,12 +59,25 @@ export default function LiveScreen() {
   const digitTimer = useRef<NodeJS.Timeout | null>(null);
   const digitBufRef = useRef("");                          // TV 事件闭包内读最新缓冲
   const failCountRef = useRef(0);                          // 连续失败计数（坏源跳台）
+  const delayedRetryTimer = useRef<NodeJS.Timeout | null>(null); // 上限耗尽后的一次性延迟再试定时器
+  const delayedRetryUsedRef = useRef(false);               // 本轮连续失败 streak 是否已用掉延迟再试（只试一次）
+  const changeChannelRef = useRef<(direction: "next" | "prev") => void>(() => {});
   const lastChannelRestoredRef = useRef(false);            // 上次频道只恢复一次
   const channelsRef = useRef<Channel[]>([]);               // 数字换台闭包内读最新列表
 
   useEffect(() => { channelsRef.current = channels; }, [channels]);
 
-  // 组件卸载时清理标题/数字定时器，防止 setState 到已卸载组件
+  // 2026-11-06 第二轮（P2-2）：取消待执行的延迟再试，并把“已用掉”标志清零，
+  // 下一轮新的连续失败 streak 可重新获得一次延迟再试。手动换台与播放成功时调用。
+  const cancelDelayedRetry = useCallback(() => {
+    if (delayedRetryTimer.current) {
+      clearTimeout(delayedRetryTimer.current);
+      delayedRetryTimer.current = null;
+    }
+    delayedRetryUsedRef.current = false;
+  }, []);
+
+  // 组件卸载时清理标题/数字/延迟重试定时器，防止 setState 到已卸载组件
   useEffect(() => {
     return () => {
       if (titleTimer.current) {
@@ -71,6 +87,10 @@ export default function LiveScreen() {
       if (digitTimer.current) {
         clearTimeout(digitTimer.current);
         digitTimer.current = null;
+      }
+      if (delayedRetryTimer.current) {
+        clearTimeout(delayedRetryTimer.current);
+        delayedRetryTimer.current = null;
       }
     };
   }, []);
@@ -116,6 +136,7 @@ export default function LiveScreen() {
   const handleSelectChannel = (channel: Channel) => {
     const globalIndex = channels.findIndex((c) => c.id === channel.id);
     if (globalIndex !== -1) {
+      cancelDelayedRetry(); // 手动选台：取消待执行的延迟再试
       selectChannelByIndex(globalIndex, channels);
       setIsChannelListVisible(false);
       setChannelFilter(""); // 关闭列表后清空过滤，下次打开为完整列表
@@ -135,6 +156,12 @@ export default function LiveScreen() {
     [currentChannelIndex, selectChannelByIndex]
   );
 
+  // 延迟再试的定时器回调须调用最新的 changeChannel（闭包里的 currentChannelIndex
+  // 会过期），故每 render 同步一份 ref；定时器本身只在 handlePlaybackError 里创建。
+  useEffect(() => {
+    changeChannelRef.current = changeChannel;
+  }, [changeChannel]);
+
   // ---------- V1.5：数字键换台 ----------
   const commitDigits = useCallback(() => {
     const n = parseInt(digitBufRef.current, 10);
@@ -145,11 +172,12 @@ export default function LiveScreen() {
     }
     const list = channelsRef.current;
     if (!isNaN(n) && n >= 1 && n <= list.length) {
+      cancelDelayedRetry(); // 数字键手动换台：取消待执行的延迟再试
       selectChannelByIndex(n - 1, list);
     } else if (!isNaN(n)) {
       showChannelTitle(`无 ${n} 号频道`);
     }
-  }, [selectChannelByIndex]);
+  }, [selectChannelByIndex, cancelDelayedRetry]);
 
   const handleDigit = useCallback((digit: string) => {
     const next = (digitBufRef.current + digit).slice(-4); // 最多 4 位，超出丢最早
@@ -248,7 +276,22 @@ export default function LiveScreen() {
     if (list.length === 0) return;
     failCountRef.current += 1;
     if (failCountRef.current > MAX_AUTO_SKIP) {
-      showChannelTitle("连续切换失败，请按左右键手动换台");
+      // 2026-11-06 第二轮（P2-2）：上限耗尽后加一次延迟自动再试，不无限循环。
+      // 本轮连续失败 streak 只安排一次：30 秒后若仍在同一失败 streak（用户未手动
+      // 换台、未播放成功），清零计数再自动切下一台；若已手动干预，定时器早被取消。
+      if (!delayedRetryUsedRef.current) {
+        delayedRetryUsedRef.current = true;
+        showChannelTitle(`连续切换失败，${DELAYED_RETRY_MS / 1000} 秒后自动再试一次`);
+        delayedRetryTimer.current = setTimeout(() => {
+          delayedRetryTimer.current = null;
+          if (failCountRef.current > MAX_AUTO_SKIP && channelsRef.current.length > 0) {
+            failCountRef.current = 0;
+            changeChannelRef.current("next");
+          }
+        }, DELAYED_RETRY_MS);
+      } else {
+        showChannelTitle("连续切换失败，请按左右键手动换台");
+      }
       return;
     }
     showChannelTitle("信号异常，自动切换下一频道…");
@@ -258,8 +301,9 @@ export default function LiveScreen() {
   const handlePlaybackStatus = useCallback((status: { isLoaded?: boolean; isPlaying?: boolean }) => {
     if (status.isLoaded && status.isPlaying) {
       failCountRef.current = 0; // 播放成功清零
+      cancelDelayedRetry(); // 播放成功：取消待执行的延迟再试，下一轮失败可重新获得一次
     }
-  }, []);
+  }, [cancelDelayedRetry]);
 
   const handleTVEvent = useCallback(
     (event: HWEvent) => {
@@ -277,10 +321,10 @@ export default function LiveScreen() {
         return;
       }
       if (t === "down") setIsChannelListVisible(true);
-      else if (t === "left") changeChannel("prev");
-      else if (t === "right") changeChannel("next");
+      else if (t === "left") { cancelDelayedRetry(); changeChannel("prev"); }
+      else if (t === "right") { cancelDelayedRetry(); changeChannel("next"); }
     },
-    [changeChannel, isChannelListVisible, deviceType, handleDigit, toggleFavCurrent]
+    [changeChannel, isChannelListVisible, deviceType, handleDigit, toggleFavCurrent, cancelDelayedRetry]
   );
 
   useTVEventHandler(deviceType === 'tv' ? handleTVEvent : () => {});
