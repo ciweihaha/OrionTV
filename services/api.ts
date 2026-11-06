@@ -135,6 +135,35 @@ export interface ServerConfig {
   StorageType: "localstorage" | "redis" | string;
 }
 
+export type SearchErrorKind = "unauthorized" | "timeout" | "network" | "unknown";
+
+/**
+ * 2026-11-06 第二轮（P1-3）：把搜索抛出的错误归一化为原因分类，供 app/search.tsx
+ * 按原因显示不同文案。只读 error 的 message/name，不改错误、不发请求。
+ * - unauthorized：401，未登录或登录已过期（_fetch 自动重登一次仍 401 才到这里）
+ * - timeout：请求超时 / 体读取超时 / 体超时熔断器打开（BODY_TIMEOUT_BREAKER_OPEN）
+ * - network：底层网络失败（TypeError / Network request failed）
+ * - unknown：其余（响应体非法、HTTP 5xx、AGG_INVALID_RESPONSE 等）
+ */
+export function classifySearchError(err: unknown): SearchErrorKind {
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  const name = err instanceof Error ? err.name : "";
+  if (message === "UNAUTHORIZED" || message.includes("401")) return "unauthorized";
+  if (
+    message.startsWith("REQUEST_TIMEOUT") ||
+    message.startsWith("RESPONSE_TIMEOUT") ||
+    message.startsWith("BODY_TIMEOUT_BREAKER_OPEN") ||
+    name === "TimeoutError" ||
+    /timeout/i.test(message)
+  ) {
+    return "timeout";
+  }
+  if (name === "TypeError" || /network request failed/i.test(message) || /network/i.test(message)) {
+    return "network";
+  }
+  return "unknown";
+}
+
 export class API {
   public baseURL: string = "";
 
@@ -608,7 +637,13 @@ export class API {
     return this.readJsonLimited(response, API.DEFAULT_TIMEOUT, undefined, "searchhistory");
   }
 
-  getImageProxyUrl(imageUrl: string): string {
+  /**
+   * 2026-11-06 第二轮（P2-4）：forceProxy=true 时强制走 MoonTV image-proxy，
+   * 供 VideoCard 海报直链加载失败后走一次代理兜底。默认 false 时行为不变：
+   * 只有 *.doubanio.com 走代理，其余直链（代理有 host allowlist，会对 agg
+   * 图床返回 403，故默认不强制走代理；兜底失败时 VideoCard 显示占位，不再重试）。
+   */
+  getImageProxyUrl(imageUrl: string, forceProxy = false): string {
     if (!imageUrl || typeof imageUrl !== "string" || !imageUrl.trim()) {
       return "";
     }
@@ -620,7 +655,8 @@ export class API {
     } catch {
       return imageUrl;
     }
-    if (hostname.endsWith(".doubanio.com")) {
+    if (forceProxy || hostname.endsWith(".doubanio.com")) {
+      if (!this.baseURL) return imageUrl; // 未配置服务器地址时无代理可用，返回原地址
       return `${this.baseURL}/api/image-proxy?url=${encodeURIComponent(imageUrl)}`;
     }
     return imageUrl;
@@ -718,6 +754,12 @@ export class API {
     throw lastError ?? new Error("AGG_REQUEST_FAILED");
   }
 
+  /**
+   * 2026-11-06 第二轮（P1-3）：搜索失败原因分类见模块级 classifySearchError，
+   * 搜索页按 kind 分文案。api 层只分类、不改任何请求逻辑与错误本身：
+   * _fetch 已透传 UNAUTHORIZED / REQUEST_TIMEOUT，readJsonLimited 透传
+   * RESPONSE_TIMEOUT。0 结果不是错误，不走这里，搜索页另有“没有找到相关内容”文案。
+   */
   async searchVideos(query: string): Promise<{ results: SearchResult[] }> {
     // 点播提速第 2 轮：同一片名 2 分钟内复用缓存（搜索页 → 详情页后台全量
     // 是同一 key 的重复请求），见文件顶部 SEARCH_CACHE_TTL_MS 注释。

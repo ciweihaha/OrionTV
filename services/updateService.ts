@@ -21,6 +21,13 @@ const ANDROID_MIME_TYPE = 'application/vnd.android.package-archive';
 
 /** 版本检查请求超时（毫秒，2026-10-28：10 秒放宽到 20 秒，国内网络容错） */
 const VERSION_CHECK_TIMEOUT_MS = 20_000;
+/**
+ * 2026-11-06 第二轮（P2-3）：版本检查首次尝试超时缩到 10 秒。
+ * 首包通常在 1 秒内返回，10 秒仍远大于正常耗时；弱网下首次失败可更快进入重试，
+ * 而不是干等 20 秒。重试仍用 20 秒（边缘抖动时给足时间），总预算语义不变：
+ * 最坏 10s + 2s 退避 + 20s + 4s 退避 + 20s ≈ 56s（原约 66s）。
+ */
+const VERSION_CHECK_FIRST_ATTEMPT_TIMEOUT_MS = 10_000;
 /** SHA256 文件获取超时（毫秒） */
 const SHA256_FETCH_TIMEOUT_MS = 15_000;
 /**
@@ -46,12 +53,23 @@ class UpdateService {
 
   /** --------------------------------------------------------------
    *  1️⃣ 远程版本检查（保持不变，只是把 fetch 包装成 async/await）
+   *  2026-11-06 第二轮（P2-3）：检查中加进度文案。onProgress 由调用方
+   *  传入时接收“正在检查更新…”/“第 N 次重试…”文案（调用方不传时仍用
+   *  Toast 显示重试进度，检查期间不再是长时间无反馈）；首次尝试超时
+   *  10 秒（VERSION_CHECK_FIRST_ATTEMPT_TIMEOUT_MS），重试仍 20 秒。
    * --------------------------------------------------------------- */
-  async checkVersion(): Promise<VersionInfo> {
+  async checkVersion(onProgress?: (status: string) => void): Promise<VersionInfo> {
     for (let attempt = 1; attempt <= UPDATE_MAX_RETRIES; attempt++) {
+      const attemptTimeoutMs =
+        attempt === 1 ? VERSION_CHECK_FIRST_ATTEMPT_TIMEOUT_MS : VERSION_CHECK_TIMEOUT_MS;
+      const statusText =
+        attempt === 1
+          ? "正在检查更新…"
+          : `正在检查更新，第 ${attempt - 1} 次重试…（共 ${UPDATE_MAX_RETRIES} 次）`;
+      onProgress?.(statusText);
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), VERSION_CHECK_TIMEOUT_MS);
+        const timeoutId = setTimeout(() => controller.abort(), attemptTimeoutMs);
         try {
           const response = await fetch(UPDATE_CONFIG.GITHUB_RAW_URL, {
             signal: controller.signal,
@@ -79,7 +97,13 @@ class UpdateService {
           });
           throw e;
         }
-        // 指数退避
+        // 指数退避；重试前给用户可见的进度提示（无 onProgress 调用方时靠 Toast）。
+        Toast.show({
+          type: 'info',
+          text1: '正在检查更新',
+          text2: `第 ${attempt} 次尝试失败，正在进行第 ${attempt + 1} 次重试…`,
+          visibilityTime: 2500,
+        });
         await new Promise(r => setTimeout(r, VERSION_CHECK_RETRY_BASE_DELAY_MS * attempt));
       }
     }
@@ -101,11 +125,17 @@ class UpdateService {
 
       if (apkFiles.length <= 2) return;
 
-      const sorted = apkFiles.sort((a, b) => {
-        const numA = parseInt(a.replace(/[^0-9]/g, ''), 10);
-        const numB = parseInt(b.replace(/[^0-9]/g, ''), 10);
-        return numB - numA; // 倒序（最新在前）
-      });
+      // 2026-11-06 第二轮（P2-5）：改用 compareVersions 排序，不再数字拼接。
+      // 旧实现 parseInt(name.replace(/[^0-9]/g, '')) 会把 "1.5.10" 拼成 1510、
+      // "1.5.9" 拼成 159，且与 "OrionTV_v" 前缀假设耦合；compareVersions 按
+      // 点分段逐段比（1.5.10 > 1.5.9），且正式版高于同数字预发布版。
+      // 文件名形如 OrionTV_v<version>.apk 或 OrionTV_v<timestamp>.apk，
+      // 先剥掉前缀/后缀再比：纯数字时间戳也是合法的单段版本号，可直接比。
+      const versionOf = (name: string) =>
+        name.replace(/^OrionTV_v/i, "").replace(/\.apk$/i, "");
+      const sorted = apkFiles.sort((a, b) =>
+        this.compareVersions(versionOf(b), versionOf(a)),
+      ); // 倒序（最新在前）
 
       const stale = sorted.slice(2); // 保留最新的两个
       for (const file of stale) {
