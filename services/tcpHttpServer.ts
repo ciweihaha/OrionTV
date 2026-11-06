@@ -1,6 +1,7 @@
 import TcpSocket from 'react-native-tcp-socket';
 import NetInfo from '@react-native-community/netinfo';
 import Logger from '@/utils/Logger';
+import { utf8ByteLength } from '../utils/utf8ByteLength';
 
 const logger = Logger.withTag('TCPHttpServer');
 
@@ -123,15 +124,24 @@ class TCPHttpServer {
           logger.debug('[TCPHttpServer] Client connected');
           
           let requestData = '';
-          
+          // 已收体积按 UTF-8 字节累计（深查第 5 轮）。旧实现用 requestData.length
+          // （UTF-16 码元数）对照 MAX_REQUEST_BYTES：中文 1 码元 = 3 字节，
+          // 1MB 码元上限实际可放行 3MB 线上字节，与 api.ts / m3u.ts / m3u8.ts /
+          // storage.ts 的 UTF-8 字节口径不一致（第 2–3 轮同类 bug 的残余）。
+          // Buffer.length 本就是字节数，字符串 chunk 用共享工具 utf8ByteLength
+          // 计字节；逐 chunk 累计，避免每 chunk 对整串重编码的 O(n²) 开销。
+          let requestBytes = 0;
+
           // 请求体上限 1MB，防恶意客户端无限发送耗尽内存
           const MAX_REQUEST_BYTES = 1024 * 1024;
           socket.on('data', async (data: string | Buffer) => {
+            requestBytes += typeof data === 'string' ? utf8ByteLength(data) : data.length;
             requestData += data.toString();
-            if (requestData.length > MAX_REQUEST_BYTES) {
+            if (requestBytes > MAX_REQUEST_BYTES) {
               logger.error('[TCPHttpServer] Request too large, closing connection');
               socket.end();
               requestData = '';
+              requestBytes = 0;
               return;
             }
 
@@ -164,6 +174,7 @@ class TCPHttpServer {
               
               socket.end();
               requestData = '';
+              requestBytes = 0;
             }
           });
 
