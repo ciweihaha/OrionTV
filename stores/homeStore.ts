@@ -206,9 +206,12 @@ interface HomeState {
   // index.tsx 的 effect 对 CMS 模式不重复触发（见 index.tsx 注释），避免一次筛选发两次请求。
   setAggFilters: (filters: Partial<AggFilters>) => Promise<void>;
   clearAggFilters: () => Promise<void>;
-  // 2026-11-05 筛选重做：待应用草稿。UI 点选项只改 pending，不发请求；
-  // 点“应用”时 applyPendingFilters 一次性把 pending 写成已应用并重查，
-  // 连选多组只发 1 次请求。pending 为 null 时 UI 应把它当成已应用值。
+  // 2026-11-06 第二轮（P1-2 方案 A）：选了即生效。组内点选项不再只改草稿，
+  // 而是经短防抖（APPLY_DEBOUNCE_MS）后由 applyPendingFilters 一次性应用并重查；
+  // 连选多组时防抖合并为 1 次请求，既恢复 1.4.x“点选项即生效”的旧语义，
+  // 又保留草稿模型“连选多组只发 1 次”的优化目标，两者不再冲突。
+  // pendingFilters 仍是 UI 已选态的唯一来源；应用完成后它与已应用值一致。
+  // pending 为 null 时 UI 应把它当成已应用值。
   pendingFilters: AggFilters | null;
   setPendingFilter: (key: keyof AggFilters, value: string) => void;
   applyPendingFilters: () => Promise<void>;
@@ -233,6 +236,25 @@ interface HomeState {
   refreshPlayRecords: () => Promise<void>;
   clearError: () => void;
 }
+
+// 2026-11-06 方案 A 防抖：点选项后等 APPLY_DEBOUNCE_MS 再应用，连选多组合并为 1 次请求。
+// 定时器属于 store 单例（非组件），放在模块级而不放 state 里，避免每次 set 触发渲染。
+const APPLY_DEBOUNCE_MS = 500;
+let pendingApplyTimer: ReturnType<typeof setTimeout> | null = null;
+const schedulePendingApply = (): void => {
+  if (pendingApplyTimer) clearTimeout(pendingApplyTimer);
+  pendingApplyTimer = setTimeout(() => {
+    pendingApplyTimer = null;
+    // useHomeStore 在本模块后方定义，此处只在运行时调用，闭包引用无问题。
+    void useHomeStore.getState().applyPendingFilters();
+  }, APPLY_DEBOUNCE_MS);
+};
+const cancelPendingApply = (): void => {
+  if (pendingApplyTimer) {
+    clearTimeout(pendingApplyTimer);
+    pendingApplyTimer = null;
+  }
+};
 
 // 内存缓存，应用生命周期内有效
 const dataCache = new Map<string, CacheItem>();
@@ -639,8 +661,8 @@ const useHomeStore = create<HomeState>((set, get) => ({
     if (JSON.stringify(merged) === JSON.stringify(cat.filters || EMPTY_AGG_FILTERS)) return;
     // CMS 与豆瓣 tag 互斥：选筛选即把 tag 置空，避免 tag + 筛选双重过滤。
     // 加载唯一入口就是这里的 fetchInitialData（index.tsx 对 CMS 模式不走 effect 重复加载）。
-    // 2026-11-05：本函数是“立即应用”入口，只由“应用”、单组清除、
-    // 全部清除调用；组内点选项只改 pending，不走这里，所以连选多组只发 1 次请求。
+    // 2026-11-06：本函数是“立即应用”入口，由 setPendingFilter 防抖后调用（组内点选项即生效）
+    // 与单组清除、全部清除直接调用；防抖保证连选多组只发 1 次请求。
     const memory = { ...(get().cmsFilterMemory || {}) };
     memory[cat.cmsType] = {
       filters: { ...merged },
@@ -695,9 +717,14 @@ const useHomeStore = create<HomeState>((set, get) => ({
     const base = get().pendingFilters || cat.filters || EMPTY_AGG_FILTERS;
     if (base[key] === value) return;
     set({ pendingFilters: { ...base, [key]: value } });
+    // 2026-11-06 方案 A：选了即生效——不再等“应用”，而是防抖后自动应用。
+    // 500ms 内再点其他组只重置计时不发请求，最后一次点选才发 1 次请求；
+    // 单独点一组则 500ms 后即发请求生效。chips × 与单组“清除”同样走这条路，点了即清即生效。
+    schedulePendingApply();
   },
 
   applyPendingFilters: async () => {
+    cancelPendingApply();
     const cat = get().selectedCategory;
     if (!cat.cmsType) return;
     const pending = get().pendingFilters;
@@ -707,14 +734,17 @@ const useHomeStore = create<HomeState>((set, get) => ({
   },
 
   discardPendingFilters: () => {
+    // 方案 A 下已无“应用”按钮，本函数只用于取消防抖窗口内尚未发出的应用
+    // （如切换分类时），把 pending 重置为已应用值。
+    cancelPendingApply();
     const cat = get().selectedCategory;
     if (!cat.cmsType) return;
     set({ pendingFilters: { ...(cat.filters || EMPTY_AGG_FILTERS) } });
   },
 
   clearAggFilterGroup: async (key: keyof AggFilters) => {
-    // 单组清除是明确动作，立即生效并重查 1 次；与组内点选项（只改草稿）
-    // 的语义分开，避免“点叉后还要再点应用”这种反直觉。
+    // 单组清除是明确动作，立即生效并重查 1 次；方案 A 下组内点选项同样立即生效
+    // （防抖合并），两者语义已统一，不再有“点叉后还要再点应用”这种反直觉。
     await get().setAggFilters({ [key]: "" } as Partial<AggFilters>);
   },
 
