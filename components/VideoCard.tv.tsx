@@ -149,7 +149,33 @@ const VideoCard = forwardRef<View, VideoCardProps>(
     // 是否是继续观看的视频
     const isContinueWatching = progress !== undefined && progress > 0 && progress < 1;
 
+    // 2026-11-06 第二轮（P2-4）：海报失败占位 + 代理兜底。
+    // 直链加载失败时先走一次 image-proxy 兜底（forceProxy），代理也失败才显示占位，
+    // 用户能分清“加载失败”而不是空白。只改失败路径，不改 expo-image 缓存策略
+    //（cachePolicy="memory-disk" 与 recyclingKey 均保持原样）。
     const posterUrl = api.getImageProxyUrl(poster);
+    const posterProxyUrl = api.getImageProxyUrl(poster, true);
+    const [posterSrc, setPosterSrc] = useState(posterUrl);
+    const [posterFailed, setPosterFailed] = useState(false);
+    const proxyTriedRef = useRef(false);
+
+    // 海报地址变化时重置失败态（同一卡片复用进不同影片时不沿用旧失败态）。
+    useEffect(() => {
+      proxyTriedRef.current = false;
+      setPosterFailed(false);
+      setPosterSrc(api.getImageProxyUrl(poster));
+    }, [poster, api]);
+
+    const handlePosterError = useCallback(() => {
+      // 直链失败且尚未试过代理、且代理地址与当前不同：走一次代理兜底。
+      if (!proxyTriedRef.current && posterProxyUrl && posterProxyUrl !== posterSrc) {
+        proxyTriedRef.current = true;
+        setPosterSrc(posterProxyUrl);
+        return;
+      }
+      // 代理也失败（或本就无代理可用）：显示占位，不再重试。
+      setPosterFailed(true);
+    }, [posterProxyUrl, posterSrc]);
 
     return (
       <Animated.View style={[styles.wrapper, animatedStyle, { opacity: fadeAnim }]}>
@@ -169,16 +195,26 @@ const VideoCard = forwardRef<View, VideoCardProps>(
           delayLongPress={1000}
         >
           <View style={styles.card}>
-            <Image
-              source={{ uri: posterUrl }}
-              style={styles.poster}
-              contentFit="cover"
-              transition={200}
-              cachePolicy="memory-disk"
-              recyclingKey={poster}
-              placeholder={null}
-              accessibilityLabel={title}
-            />
+            {posterFailed ? (
+              <View style={[styles.poster, styles.posterFallback]}>
+                <ThemedText style={styles.posterFallbackTitle} numberOfLines={1}>
+                  {title ? title.charAt(0) : "?"}
+                </ThemedText>
+                <ThemedText style={styles.posterFallbackText}>海报加载失败</ThemedText>
+              </View>
+            ) : (
+              <Image
+                source={{ uri: posterSrc }}
+                style={styles.poster}
+                contentFit="cover"
+                transition={200}
+                cachePolicy="memory-disk"
+                recyclingKey={poster}
+                placeholder={null}
+                onError={handlePosterError}
+                accessibilityLabel={title}
+              />
+            )}
             {isFocused && (
               <View style={styles.overlay}>
                 {isContinueWatching && (
@@ -259,6 +295,22 @@ const styles = StyleSheet.create({
   poster: {
     width: "100%",
     height: "100%",
+  },
+  // 海报加载失败占位：深灰底 + 片名首字 + 提示文案，避免空白卡片。
+  posterFallback: {
+    backgroundColor: "#333",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  posterFallbackTitle: {
+    color: "#888",
+    fontSize: 64,
+    fontWeight: "bold",
+  },
+  posterFallbackText: {
+    color: "#888",
+    fontSize: 12,
+    marginTop: 8,
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
